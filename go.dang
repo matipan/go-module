@@ -101,87 +101,85 @@ type Go {
     goModPaths(ws)
       .map { modPath =>
         let path = modulePathFromGoMod(modPath)
-        let nestedModuleExcludes = ws
-          .directory("/", include: ["**/go.mod"], exclude: exclude)
-          .glob("**/go.mod")
-          .map { modPath => modulePathFromGoMod(modPath) }
-          .filter { nestedPath =>
-            if (path == ".") {
-              nestedPath != "."
-            } else {
-              nestedPath.hasPrefix(path.trimSuffix("/") + "/")
-            }
-          }
-          .map { nestedPath => moduleIncludePath(nestedPath, "**") }
-        let goFiles = ws
-          .directory(
-            "/",
-            include: [moduleIncludePath(path, "**/*.go")],
-            exclude: exclude + nestedModuleExcludes,
-          )
-          .glob("**/*.go")
-        let includeFromGoDirectives = if (goFiles.length == 0) {
-          [] :: [String!]!
-        } else {
-          let source = ws.directory("/", include: goFiles, exclude: exclude)
-          goFiles.reduce([] :: [String!]!) { includes, filePath =>
-            let fileDir = filePath.split("/").dropLast.join("/")
-            includes + goIncludesHelper(source)
-              .withExec(["go", "run", ".", "source", "--add-prefix=" + fileDir, "--", "/src/" + filePath])
-              .stdout
-              .split("\n")
-              .filter { pattern => pattern != "" }
-          }
-        }
-        let goModPath = moduleIncludePath(path, "go.mod")
-        let goModSource = ws.directory("/", include: [goModPath], exclude: exclude)
-        let includeFromGoModReplace = goIncludesHelper(goModSource)
-          .withExec(["go", "run", ".", "gomod", "--add-prefix=" + path, "--", "/src/" + goModPath])
-          .stdout
-          .split("\n")
-          .filter { pattern => pattern != "" }
-        let include = [
-          "**/*.go",
-          "**/*.c",
-          "**/*.h",
-          "**/*.s",
-          "**/*.S",
-          "**/*.syso",
-          "**/go.mod",
-          "**/go.sum",
-          "**/go.work",
-          "**/go.work.sum",
-        ] + includeExtraFiles + includeFromGoDirectives + includeFromGoModReplace
-        let source = ws.directory(
-          "/",
-          include: include,
-          exclude: exclude,
-        )
-        GoModule(
-          path: path,
-          version: version,
-          includeFromGoDirectives: includeFromGoDirectives,
-          includeFromGoModReplace: includeFromGoModReplace,
-          source: source,
-          testdata: ws.directory(
-            "/",
-            include: ["**/testdata/**"],
-            exclude: exclude,
-          ),
-        )
+        module(ws, path)
       }
-    # FIXME: scope testdata to this module instead of mounting every
-    # workspace testdata directory into every module's test container.
-
   }
 
   """
   Return one discovered Go module by its workspace-relative path.
   """
   pub module(ws: Workspace!, path: String!): GoModule! {
-    let match = modules(ws).filter { module => module.path == path }[0]
-    if (match != null) {
-      match
+    let modPath = goModPaths(ws).filter { modPath => modulePathFromGoMod(modPath) == path }[0]
+    if (modPath != null) {
+      let nestedModuleExcludes = ws
+        .directory("/", include: ["**/go.mod"], exclude: exclude)
+        .glob("**/go.mod")
+        .map { modPath => modulePathFromGoMod(modPath) }
+        .filter { nestedPath =>
+          if (path == ".") {
+            nestedPath != "."
+          } else {
+            nestedPath.hasPrefix(path.trimSuffix("/") + "/")
+          }
+        }
+        .map { nestedPath => moduleIncludePath(nestedPath, "**") }
+      let goFiles = ws
+        .directory(
+          "/",
+          include: [moduleIncludePath(path, "**/*.go")],
+          exclude: exclude + nestedModuleExcludes,
+        )
+        .glob("**/*.go")
+      let includeFromGoDirectives = if (goFiles.length == 0) {
+        [] :: [String!]!
+      } else {
+        let source = ws.directory("/", include: goFiles, exclude: exclude)
+        goFiles.reduce([] :: [String!]!) { includes, filePath =>
+          let fileDir = filePath.split("/").dropLast.join("/")
+          includes + goIncludesHelper(source)
+            .withExec(["go", "run", ".", "source", "--add-prefix=" + fileDir, "--", "/src/" + filePath])
+            .stdout
+            .split("\n")
+            .filter { pattern => pattern != "" }
+        }
+      }
+      let goModSource = ws.directory("/", include: [modPath], exclude: exclude)
+      let includeFromGoModReplace = goIncludesHelper(goModSource)
+        .withExec(["go", "run", ".", "gomod", "--add-prefix=" + path, "--", "/src/" + modPath])
+        .stdout
+        .split("\n")
+        .filter { pattern => pattern != "" }
+      let include = [
+        "**/*.go",
+        "**/*.c",
+        "**/*.h",
+        "**/*.s",
+        "**/*.S",
+        "**/*.syso",
+        "**/go.mod",
+        "**/go.sum",
+        "**/go.work",
+        "**/go.work.sum",
+      ] + includeExtraFiles + includeFromGoDirectives + includeFromGoModReplace
+      let source = ws.directory(
+        "/",
+        include: include,
+        exclude: exclude,
+      )
+      GoModule(
+        path: path,
+        version: version,
+        includeFromGoDirectives: includeFromGoDirectives,
+        includeFromGoModReplace: includeFromGoModReplace,
+        source: source,
+        # FIXME: scope testdata to this module instead of mounting every
+        # workspace testdata directory into every module's test container.
+        testdata: ws.directory(
+          "/",
+          include: ["**/testdata/**"],
+          exclude: exclude,
+        ),
+      )
     } else {
       raise "go module not found: " + path
     }

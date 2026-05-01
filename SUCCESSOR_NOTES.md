@@ -29,6 +29,8 @@ Good public surface:
 - `Go.modules(ws)` lists discovered modules.
 - `Go.module(ws, path)` returns one discovered module. This is useful because the
   Dagger CLI does not provide a good built-in way to filter arrays of objects.
+- `Go.module(ws, path)` owns `GoModule` construction. `Go.modules(ws)` should
+  discover paths and call `Go.module` for each one.
 - `GoModule.path` is the module root path relative to the workspace.
 - `GoModule.includeFromGoDirectives` is the include list discovered from that
   module's Go source directives, including `go:embed` and `workspace:include`.
