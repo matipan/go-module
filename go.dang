@@ -57,6 +57,13 @@ type Go {
   }
 
   """
+  Normalize include patterns for workspace directory filters.
+  """
+  let cleanInclude(pattern: String!): String! {
+    pattern.trimPrefix("./").trimPrefix("/")
+  }
+
+  """
   Resolve workspace paths selected by selectModule or selectModules.
   """
   let selectedPaths(pattern: String!, allPattern: String!): [String!]! {
@@ -97,40 +104,114 @@ type Go {
   }
 
   """
-  Extra include patterns discovered from Go file annotations.
+  Discover selected Go source files for source annotations.
+  """
+  let goFiles(ws: Workspace!): [String!]! {
+    let include = selectedPaths("**/*.go", "**/*.go")
+    if (include.length == 0) {
+      [] :: [String!]!
+    } else {
+      ws.directory("/", include: include, exclude: exclude).glob("**/*.go")
+    }
+  }
+
+  """
+  Resolve a package-relative pattern from a Go source file to the workspace root.
+  """
+  let resolveGoFilePattern(filePath: String!, pattern: String!): String! {
+    let fileDir = filePath.split("/").dropLast.join("/")
+    if (pattern.hasPrefix("/")) {
+      pattern.trimPrefix("/")
+    } else {
+      (fileDir + "/" + pattern).trimPrefix("/")
+    }
+  }
+
+  """
+  Selected Go source files as a directory.
+  """
+  let goFileDirectory(ws: Workspace!, files: [String!]!): Directory! {
+    ws.directory("/", include: files, exclude: exclude)
+  }
+
+  """
+  Extra include patterns discovered from workspace:include annotations.
   Each workspace:include directive accepts one pattern. Use multiple directives
   for multiple patterns.
   """
-  let workspaceInclude(ws: Workspace!, fileInclude: [String!]!, glob: String!): [String!]! {
-    if (fileInclude.length == 0) {
+  let workspaceAnnotationIncludes(ws: Workspace!, files: [String!]!): [String!]! {
+    if (files.length == 0) {
       [] :: [String!]!
     } else {
-      let files = ws.directory("/", include: fileInclude, exclude: exclude).glob(glob)
-      if (files.length == 0) {
+      goFileDirectory(ws, files)
+        .search(pattern: "^\\s*//\\s*workspace:include\\s+\\S+\\s*$", paths: files).{filePath, matchedLines}
+        .reduce([] :: [String!]!) { includes, match =>
+          let pattern = match
+            .matchedLines
+            .trimSpace
+            .trimPrefix("//")
+            .trimSpace
+            .trimPrefix("workspace:include")
+            .trimSpace
+          includes + [resolveGoFilePattern(match.filePath, pattern)]
+        }
+    }
+  }
+
+  """
+  Extra include patterns discovered from //go:embed directives.
+  """
+  let goEmbedIncludes(ws: Workspace!, files: [String!]!): [String!]! {
+    if (files.length == 0) {
+      [] :: [String!]!
+    } else {
+      let matches = goFileDirectory(ws, files)
+        .search(pattern: "^\\s*//go:embed(\\s|$)", paths: files).{filePath}
+      if (matches.length == 0) {
         [] :: [String!]!
       } else {
-        ws
-          .directory("/", include: files, exclude: exclude)
-          .search(pattern: "^\\s*//\\s*workspace:include\\s+\\S+\\s*$", paths: files).{filePath, matchedLines}
-          .reduce([] :: [String!]!) { includes, match =>
-            let fileDir = match.filePath.split("/").dropLast.join("/")
-            let pattern = match
-              .matchedLines
-              .trimSpace
-              .trimPrefix("//")
-              .trimSpace
-              .trimPrefix("workspace:include")
-              .trimSpace
-            includes + [
-              if (pattern.hasPrefix("/")) {
-                pattern.trimPrefix("/")
-              } else {
-                (fileDir + "/" + pattern).trimPrefix("/")
-              },
-            ]
-          }
+        container
+          .from("golang:" + version + "-alpine")
+          .withoutEntrypoint
+          .withWorkdir("/src")
+          .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+          .withDirectory("/src", goFileDirectory(ws, files))
+          .withFile("/scan-go-embeds.go", currentModule.source.file(".dagger/scripts/go-embed-includes.go"))
+          .withExec(["go", "run", "/scan-go-embeds.go", "--"] + files)
+          .stdout
+          .split("\n")
+          .filter { pattern => pattern != "" }
       }
     }
+  }
+
+  """
+  Extra include patterns discovered from selected Go source files.
+  """
+  let goFileIncludes(ws: Workspace!): [String!]! {
+    let files = goFiles(ws)
+    workspaceAnnotationIncludes(ws, files) + goEmbedIncludes(ws, files)
+  }
+
+  """
+  Normalize all include patterns before sending them to the workspace API.
+  """
+  let cleanIncludes(patterns: [String!]!): [String!]! {
+    patterns.map { pattern => cleanInclude(pattern) }
+  }
+
+  """
+  Hardcoded and discovered workspace paths needed for Go commands.
+  """
+  let sourceIncludes(ws: Workspace!): [String!]! {
+    cleanIncludes(include + goFileIncludes(ws))
+  }
+
+  """
+  Hardcoded workspace paths mounted only while running tests.
+  """
+  let testdataIncludes: [String!]! {
+    cleanIncludes(testdataInclude)
   }
 
   """
@@ -139,16 +220,12 @@ type Go {
   pub modules(ws: Workspace!): [GoModule!]! {
     let source = ws.directory(
       "/",
-      include: include.map { pattern =>
-        pattern.trimPrefix("./").trimPrefix("/")
-      } + workspaceInclude(ws, selectedPaths("**/*.go", "**/*.go"), "**/*.go"),
+      include: sourceIncludes(ws),
       exclude: exclude,
     )
     let testdata = ws.directory(
       "/",
-      include: testdataInclude.map { pattern =>
-        pattern.trimPrefix("./").trimPrefix("/")
-      },
+      include: testdataIncludes,
       exclude: exclude,
     )
     goModPaths(ws)
