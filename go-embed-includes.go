@@ -1,160 +1,78 @@
+// go.dang runs this helper inside the mounted source tree.
+// Input: one Go source file path.
+// Output: parsed //go:embed patterns from that file, one per line, with all: stripped.
 package main
 
 import (
+	"errors"
 	"fmt"
-	"io/fs"
+	"go/build"
+	"go/token"
 	"os"
-	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"text/scanner"
-	"unicode"
-	"unicode/utf8"
 )
 
 func main() {
-	seenIncludes := map[string]bool{}
-	if err := filepath.WalkDir(".", func(filePath string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			if filepath.Ext(filePath) == ".go" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if filepath.Ext(filePath) != ".go" {
-			return nil
-		}
+	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: go run go-embed-includes.go -- <go-file>")
+		os.Exit(2)
+	}
 
-		workspacePath := strings.TrimPrefix(filepath.ToSlash(filePath), "./")
-		patterns, err := embedPatterns(workspacePath)
-		if err != nil {
-			return fmt.Errorf("%s: %w", workspacePath, err)
-		}
-		for _, pattern := range patterns {
-			for _, include := range includePatterns(workspacePath, pattern) {
-				if include == "" || seenIncludes[include] {
-					continue
-				}
-				seenIncludes[include] = true
-				fmt.Println(include)
-			}
-		}
-		return nil
-	}); err != nil {
+	patterns, err := embedPatterns(args[0])
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	for _, pattern := range patterns {
+		fmt.Println(pattern)
 	}
 }
 
 func embedPatterns(filePath string) ([]string, error) {
-	src, err := os.ReadFile(filePath)
+	pkg, err := build.ImportDir(filepath.Dir(filePath), build.ImportComment)
 	if err != nil {
-		return nil, err
-	}
-
-	var s scanner.Scanner
-	s.Init(strings.NewReader(string(src)))
-	s.Mode = scanner.GoTokens &^ scanner.SkipComments
-
-	var patterns []string
-	for tok := s.Scan(); tok != scanner.EOF; tok = s.Scan() {
-		if tok != scanner.Comment {
-			continue
-		}
-		commentPatterns, err := parseGoEmbed(s.TokenText())
-		if err != nil {
+		var noGo *build.NoGoError
+		if !errors.As(err, &noGo) {
 			return nil, err
 		}
-		patterns = append(patterns, commentPatterns...)
 	}
-	return patterns, nil
-}
-
-func parseGoEmbed(comment string) ([]string, error) {
-	const directive = "//go:embed"
-	comment = strings.TrimSpace(comment)
-	if !strings.HasPrefix(comment, directive) {
+	if pkg == nil {
 		return nil, nil
 	}
-	args := strings.TrimPrefix(comment, directive)
-	if args != "" {
-		r, _ := utf8.DecodeRuneInString(args)
-		if !unicode.IsSpace(r) {
-			return nil, nil
-		}
-	}
-	return parseGoEmbedArgs(args)
-}
 
-func parseGoEmbedArgs(args string) ([]string, error) {
 	var patterns []string
-	for args = strings.TrimSpace(args); args != ""; args = strings.TrimSpace(args) {
-		var pattern string
-		switch args[0] {
-		case '`':
-			i := strings.Index(args[1:], "`")
-			if i < 0 {
-				return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args)
-			}
-			pattern = args[1 : i+1]
-			args = args[i+2:]
-		case '"':
-			i := 1
-			for ; i < len(args); i++ {
-				if args[i] == '\\' {
-					i++
-					continue
-				}
-				if args[i] == '"' {
-					quoted := args[:i+1]
-					unquoted, err := strconv.Unquote(quoted)
-					if err != nil {
-						return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", quoted)
-					}
-					pattern = unquoted
-					args = args[i+1:]
-					break
-				}
-			}
-			if pattern == "" {
-				return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args)
-			}
-		default:
-			i := len(args)
-			for j, r := range args {
-				if unicode.IsSpace(r) {
-					i = j
-					break
-				}
-			}
-			pattern = args[:i]
-			args = args[i:]
-		}
-
-		if args != "" {
-			r, _ := utf8.DecodeRuneInString(args)
-			if !unicode.IsSpace(r) {
-				return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args)
-			}
-		}
-		patterns = append(patterns, pattern)
-	}
+	patterns = append(patterns, patternsInFile(filePath, pkg.EmbedPatterns, pkg.EmbedPatternPos)...)
+	patterns = append(patterns, patternsInFile(filePath, pkg.TestEmbedPatterns, pkg.TestEmbedPatternPos)...)
+	patterns = append(patterns, patternsInFile(filePath, pkg.XTestEmbedPatterns, pkg.XTestEmbedPatternPos)...)
 	return patterns, nil
 }
 
-func includePatterns(filePath, pattern string) []string {
-	pattern = strings.TrimPrefix(pattern, "all:")
-	dir := path.Dir(filepath.ToSlash(filePath))
-	if dir == "." {
-		dir = ""
+func patternsInFile(filePath string, patterns []string, positions map[string][]token.Position) []string {
+	var matches []string
+	for _, pattern := range patterns {
+		for _, pos := range positions[pattern] {
+			if sameFile(filePath, pos.Filename) {
+				matches = append(matches, strings.TrimPrefix(pattern, "all:"))
+				break
+			}
+		}
 	}
-	include := path.Clean(path.Join(dir, pattern))
-	if include == "." {
-		return nil
+	return matches
+}
+
+func sameFile(a, b string) bool {
+	absA, err := filepath.Abs(a)
+	if err == nil {
+		a = absA
 	}
-	return []string{include, include + "/**"}
+	absB, err := filepath.Abs(b)
+	if err == nil {
+		b = absB
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }

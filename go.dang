@@ -135,6 +135,19 @@ type Go {
   }
 
   """
+  Preserve first occurrence order while removing duplicate strings.
+  """
+  let uniqueStrings(values: [String!]!): [String!]! {
+    values.reduce([] :: [String!]!) { unique, value =>
+      if (unique.filter { existing => existing == value }.length > 0) {
+        unique
+      } else {
+        unique + [value]
+      }
+    }
+  }
+
+  """
   Extra include patterns discovered from workspace:include annotations.
   Each workspace:include directive accepts one pattern. Use multiple directives
   for multiple patterns.
@@ -160,6 +173,8 @@ type Go {
 
   """
   Extra include patterns discovered from //go:embed directives.
+  The scanner runs once per matching Go file and prints parsed //go:embed
+  patterns, one per line, with Go-only syntax such as all: removed.
   """
   let goEmbedIncludes(ws: Workspace!, files: [String!]!): [String!]! {
     if (files.length == 0) {
@@ -170,17 +185,22 @@ type Go {
       if (matches.length == 0) {
         [] :: [String!]!
       } else {
-        container
-          .from("golang:" + version + "-alpine")
-          .withoutEntrypoint
-          .withWorkdir("/src")
-          .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-          .withDirectory("/src", goFileDirectory(ws, files))
-          .withFile("/scan-go-embeds.go", currentModule.source.file("go-embed-includes.go"))
-          .withExec(["go", "run", "/scan-go-embeds.go"])
-          .stdout
-          .split("\n")
-          .filter { pattern => pattern != "" }
+        let source = goFileDirectory(ws, files)
+        let matchingFiles = uniqueStrings(matches.map { match => match.filePath })
+        matchingFiles.reduce([] :: [String!]!) { includes, filePath =>
+          let patterns = container
+            .from("golang:" + version + "-alpine")
+            .withoutEntrypoint
+            .withWorkdir("/src")
+            .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+            .withDirectory("/src", source)
+            .withFile("/go-embed-includes.go", currentModule.source.file("go-embed-includes.go"))
+            .withExec(["go", "run", "/go-embed-includes.go", "--", filePath])
+            .stdout
+            .split("\n")
+            .filter { pattern => pattern != "" }
+          includes + patterns.map { pattern => resolveGoFilePattern(filePath, pattern) }
+        }
       }
     }
   }
