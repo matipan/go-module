@@ -69,24 +69,24 @@ type E2e {
 
     assert(
       mod.path == "testdata/go-module-with-testdata",
-      "module lookup returned unexpected module: " + mod.path,
+      "module handle returned unexpected path: " + mod.path,
     )
     assert(
-      containsPath(mod.includeFromGoDirectives, "LICENSE"),
+      containsPath(mod.includeFromGoDirectives(ws), "LICENSE"),
       "source includes did not include workspace-root directive include",
     )
     assert(
-      containsPath(mod.includeFromGoDirectives, "testdata/go-module-with-testdata/embedded-assets/message.txt"),
+      containsPath(mod.includeFromGoDirectives(ws), "testdata/go-module-with-testdata/embedded-assets/message.txt"),
       "source includes did not include go:embed file",
     )
     assert(
-      mod.source.file("LICENSE").contents.contains("Apache License"),
+      mod.source(ws).file("LICENSE").contents.contains("Apache License"),
       "source directory did not include LICENSE",
     )
 
     let replaced = go(version: "1.25").module(ws, "fixtures/go-module-with-replace")
     assert(
-      containsPath(replaced.includeFromGoModReplace, "fixtures/go-module-with-replace/../replaced-lib/**"),
+      containsPath(replaced.includeFromGoModReplace(ws), "fixtures/go-module-with-replace/../replaced-lib/**"),
       "go.mod replace includes did not include replaced lib",
     )
     null

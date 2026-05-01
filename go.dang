@@ -70,13 +70,94 @@ type Go {
   }
 
   """
+  Scan the workspace for Go modules.
+  """
+  pub modules(ws: Workspace!): [GoModule!]! {
+    goModPaths(ws)
+      .map { modPath =>
+        let path = modulePathFromGoMod(modPath)
+        module(ws, path)
+      }
+  }
+
+  """
+  Return a Go module handle for a workspace-relative module path.
+  """
+  pub module(ws: Workspace!, path: String!): GoModule! {
+    GoModule(
+      path: path,
+      version: version,
+      includeExtraFiles: includeExtraFiles,
+      exclude: exclude,
+    )
+  }
+
+  """
+  Run tests in every discovered Go module.
+  """
+  pub testAll(ws: Workspace!): Void @check {
+    let layers = modules(ws).reduce(directory) { layers, mod =>
+      layers.withDirectory(
+        mod.path,
+        directory.withFile("go.mod", mod.testExec(ws).file("go.mod")),
+      )
+    }
+    # FIXME: replace this when Dagger can directly run multiple containers in
+    # parallel. For now, merge one file from each Go module's test container
+    # into a directory and sync it to force every testExec to run.
+
+    layers.sync
+    null
+  }
+
+  """
+  Run go generate in every discovered Go module.
+  """
+  pub generate(ws: Workspace!): Changeset! @generate {
+    let mods = modules(ws)
+    let before = mods.reduce(directory) { before, mod =>
+      before.withDirectory(mod.path, mod.source(ws).directory(mod.path))
+    }
+    let after = mods.reduce(before) { after, mod =>
+      after.withDirectory(mod.path, mod.generate(ws))
+    }
+    after.changes(before)
+  }
+
+}
+
+"""
+A Go module handle rooted at a workspace-relative path.
+"""
+type GoModule {
+  """
+  Path of the module directory in the workspace.
+  """
+  pub path: String!
+
+  """
+  Go version to use.
+  """
+  let version: String!
+
+  """
+  Extra workspace files to include when running Go commands.
+  """
+  let includeExtraFiles: [String!]!
+
+  """
+  Workspace paths to omit from Go command inputs.
+  """
+  let exclude: [String!]!
+
+  """
   Resolve a module-relative pattern to the workspace root.
   """
-  let moduleIncludePath(modulePath: String!, pattern: String!): String! {
-    if (modulePath == ".") {
+  let includePath(pattern: String!): String! {
+    if (path == ".") {
       pattern
     } else {
-      modulePath.trimSuffix("/") + "/" + pattern
+      path.trimSuffix("/") + "/" + pattern
     }
   }
 
@@ -95,163 +176,107 @@ type Go {
   }
 
   """
-  Scan the workspace for Go modules.
-  """
-  pub modules(ws: Workspace!): [GoModule!]! {
-    goModPaths(ws)
-      .map { modPath =>
-        let path = modulePathFromGoMod(modPath)
-        module(ws, path)
-      }
-  }
-
-  """
-  Return one discovered Go module by its workspace-relative path.
-  """
-  pub module(ws: Workspace!, path: String!): GoModule! {
-    let modPath = goModPaths(ws).filter { modPath => modulePathFromGoMod(modPath) == path }[0]
-    if (modPath != null) {
-      let nestedModuleExcludes = ws
-        .directory("/", include: ["**/go.mod"], exclude: exclude)
-        .glob("**/go.mod")
-        .map { modPath => modulePathFromGoMod(modPath) }
-        .filter { nestedPath =>
-          if (path == ".") {
-            nestedPath != "."
-          } else {
-            nestedPath.hasPrefix(path.trimSuffix("/") + "/")
-          }
-        }
-        .map { nestedPath => moduleIncludePath(nestedPath, "**") }
-      let goFiles = ws
-        .directory(
-          "/",
-          include: [moduleIncludePath(path, "**/*.go")],
-          exclude: exclude + nestedModuleExcludes,
-        )
-        .glob("**/*.go")
-      let includeFromGoDirectives = if (goFiles.length == 0) {
-        [] :: [String!]!
-      } else {
-        let source = ws.directory("/", include: goFiles, exclude: exclude)
-        goFiles.reduce([] :: [String!]!) { includes, filePath =>
-          let fileDir = filePath.split("/").dropLast.join("/")
-          includes + goIncludesHelper(source)
-            .withExec(["go", "run", ".", "source", "--add-prefix=" + fileDir, "--", "/src/" + filePath])
-            .stdout
-            .split("\n")
-            .filter { pattern => pattern != "" }
-        }
-      }
-      let goModSource = ws.directory("/", include: [modPath], exclude: exclude)
-      let includeFromGoModReplace = goIncludesHelper(goModSource)
-        .withExec(["go", "run", ".", "gomod", "--add-prefix=" + path, "--", "/src/" + modPath])
-        .stdout
-        .split("\n")
-        .filter { pattern => pattern != "" }
-      let include = [
-        "**/*.go",
-        "**/*.c",
-        "**/*.h",
-        "**/*.s",
-        "**/*.S",
-        "**/*.syso",
-        "**/go.mod",
-        "**/go.sum",
-        "**/go.work",
-        "**/go.work.sum",
-      ] + includeExtraFiles + includeFromGoDirectives + includeFromGoModReplace
-      let source = ws.directory(
-        "/",
-        include: include,
-        exclude: exclude,
-      )
-      GoModule(
-        path: path,
-        version: version,
-        includeFromGoDirectives: includeFromGoDirectives,
-        includeFromGoModReplace: includeFromGoModReplace,
-        source: source,
-        # FIXME: scope testdata to this module instead of mounting every
-        # workspace testdata directory into every module's test container.
-        testdata: ws.directory(
-          "/",
-          include: ["**/testdata/**"],
-          exclude: exclude,
-        ),
-      )
-    } else {
-      raise "go module not found: " + path
-    }
-  }
-
-  """
-  Run tests in every discovered Go module.
-  """
-  pub testAll(ws: Workspace!): Void @check {
-    let layers = modules(ws).reduce(directory) { layers, mod =>
-      layers.withDirectory(
-        mod.path,
-        directory.withFile("go.mod", mod.testExec.file("go.mod")),
-      )
-    }
-    # FIXME: replace this when Dagger can directly run multiple containers in
-    # parallel. For now, merge one file from each Go module's test container
-    # into a directory and sync it to force every testExec to run.
-
-    layers.sync
-    null
-  }
-
-  """
-  Run go generate in every discovered Go module.
-  """
-  pub generate(ws: Workspace!): Changeset! @generate {
-    let mods = modules(ws)
-    let before = mods.reduce(directory) { before, mod =>
-      before.withDirectory(mod.path, mod.source.directory(mod.path))
-    }
-    let after = mods.reduce(before) { after, mod =>
-      after.withDirectory(mod.path, mod.generate)
-    }
-    after.changes(before)
-  }
-
-}
-
-"""
-A discovered Go module in the workspace.
-"""
-type GoModule {
-  """
-  Path of the module directory in the workspace.
-  """
-  pub path: String!
-
-  """
-  Go version to use.
-  """
-  let version: String!
-
-  """
   Workspace include patterns discovered from this module's Go source directives.
   """
-  pub includeFromGoDirectives: [String!]!
+  pub includeFromGoDirectives(ws: Workspace!): [String!]! {
+    let nestedModuleExcludes = ws
+      .directory("/", include: ["**/go.mod"], exclude: exclude)
+      .glob("**/go.mod")
+      .map { modPath =>
+        let rawPath = modPath.trimSuffix("go.mod").trimSuffix("/")
+        if (rawPath == "") { "." } else { rawPath }
+      }
+      .filter { nestedPath =>
+        if (path == ".") {
+          nestedPath != "."
+        } else {
+          nestedPath.hasPrefix(path.trimSuffix("/") + "/")
+        }
+      }
+      .map { nestedPath =>
+        if (nestedPath == ".") {
+          "**"
+        } else {
+          nestedPath.trimSuffix("/") + "/**"
+        }
+      }
+    let goFiles = ws
+      .directory(
+        "/",
+        include: [includePath("**/*.go")],
+        exclude: exclude + nestedModuleExcludes,
+      )
+      .glob("**/*.go")
+    if (goFiles.length == 0) {
+      [] :: [String!]!
+    } else {
+      let source = ws.directory("/", include: goFiles, exclude: exclude)
+      goFiles.reduce([] :: [String!]!) { includes, filePath =>
+        let fileDir = filePath.split("/").dropLast.join("/")
+        includes + goIncludesHelper(source)
+          .withExec(["go", "run", ".", "source", "--add-prefix=" + fileDir, "--", "/src/" + filePath])
+          .stdout
+          .split("\n")
+          .filter { pattern => pattern != "" }
+      }
+    }
+  }
 
   """
   Workspace include patterns discovered from this module's local go.mod replace directives.
   """
-  pub includeFromGoModReplace: [String!]!
+  pub includeFromGoModReplace(ws: Workspace!): [String!]! {
+    let goModPath = includePath("go.mod")
+    let goModSource = ws.directory("/", include: [goModPath], exclude: exclude)
+    goIncludesHelper(goModSource)
+      .withExec(["go", "run", ".", "gomod", "--add-prefix=" + path, "--", "/src/" + goModPath])
+      .stdout
+      .split("\n")
+      .filter { pattern => pattern != "" }
+  }
+
+  """
+  Final workspace include patterns for this module's Go command source.
+  """
+  pub include(ws: Workspace!): [String!]! {
+    [
+      "**/*.go",
+      "**/*.c",
+      "**/*.h",
+      "**/*.s",
+      "**/*.S",
+      "**/*.syso",
+      "**/go.mod",
+      "**/go.sum",
+      "**/go.work",
+      "**/go.work.sum",
+    ] + includeExtraFiles + includeFromGoDirectives(ws) + includeFromGoModReplace(ws)
+  }
 
   """
   Filtered workspace source mounted for Go commands.
   """
-  pub source: Directory!
+  pub source(ws: Workspace!): Directory! {
+    ws.directory(
+      "/",
+      include: include(ws),
+      exclude: exclude,
+    )
+  }
 
   """
   Filtered test fixture files mounted only while running tests.
   """
-  let testdata: Directory!
+  let testData(ws: Workspace!): Directory! {
+    ws.directory(
+      "/",
+      include: [
+        includePath("testdata/**"),
+        includePath("**/testdata/**"),
+      ],
+      exclude: exclude,
+    )
+  }
 
   """
   Base container for Go commands.
@@ -268,17 +293,17 @@ type GoModule {
   """
   Run tests in this module.
   """
-  pub test: Void @check {
-    testExec.sync
+  pub test(ws: Workspace!): Void @check {
+    testExec(ws).sync
     null
   }
 
   """
   Module directory after running go generate.
   """
-  pub generate: Directory! {
+  pub generate(ws: Workspace!): Directory! {
     base
-      .withDirectory(".", source)
+      .withDirectory(".", source(ws))
       .withWorkdir(path)
       .withExec(["go", "generate", "./..."])
       .directory(".")
@@ -287,11 +312,11 @@ type GoModule {
   """
   Container state after running this module's test check.
   """
-  let testExec: Container! {
+  let testExec(ws: Workspace!): Container! {
     base
       .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@main"])
-      .withDirectory(".", source)
-      .withDirectory(".", testdata)
+      .withDirectory(".", source(ws))
+      .withDirectory(".", testData(ws))
       # Nested Dagger clients find the workspace boundary by walking up to .git.
       .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
       .withWorkdir(path)
