@@ -176,7 +176,7 @@ type Go {
           .withWorkdir("/src")
           .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
           .withDirectory("/src", goFileDirectory(ws, files))
-          .withFile("/scan-go-embeds.go", currentModule.source.file(".dagger/scripts/go-embed-includes.go"))
+          .withFile("/scan-go-embeds.go", currentModule.source.file("go-embed-includes.go"))
           .withExec(["go", "run", "/scan-go-embeds.go"])
           .stdout
           .split("\n")
