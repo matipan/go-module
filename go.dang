@@ -98,11 +98,6 @@ type Go {
   Scan the workspace for Go modules.
   """
   pub modules(ws: Workspace!): [GoModule!]! {
-    let testdata = ws.directory(
-      "/",
-      include: ["**/testdata/**"],
-      exclude: exclude,
-    )
     goModPaths(ws)
       .map { modPath =>
         let path = modulePathFromGoMod(modPath)
@@ -168,9 +163,16 @@ type Go {
           includeFromGoDirectives: includeFromGoDirectives,
           includeFromGoModReplace: includeFromGoModReplace,
           source: source,
-          testdata: testdata,
+          testdata: ws.directory(
+            "/",
+            include: ["**/testdata/**"],
+            exclude: exclude,
+          ),
         )
       }
+    # FIXME: scope testdata to this module instead of mounting every
+    # workspace testdata directory into every module's test container.
+
   }
 
   """
@@ -190,11 +192,15 @@ type Go {
   """
   pub testAll(ws: Workspace!): Void @check {
     let layers = modules(ws).reduce(directory) { layers, mod =>
-      # FIXME: replace this when Dagger can directly run multiple containers in
-      # parallel. For now, merge one file from each Go module's test container
-      # into a directory and sync it to force every testExec to run.
-      layers.withDirectory(mod.path, directory.withFile("go.mod", mod.testExec.file("go.mod")))
+      layers.withDirectory(
+        mod.path,
+        directory.withFile("go.mod", mod.testExec.file("go.mod")),
+      )
     }
+    # FIXME: replace this when Dagger can directly run multiple containers in
+    # parallel. For now, merge one file from each Go module's test container
+    # into a directory and sync it to force every testExec to run.
+
     layers.sync
     null
   }
