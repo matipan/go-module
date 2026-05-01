@@ -62,6 +62,56 @@ type E2e {
   }
 
   """
+  Per-module introspection fields must expose the source selection intermediates.
+  """
+  pub moduleIntrospectionCheck(ws: Workspace!): Void @check {
+    let mod = go(version: "1.25").module(ws, "testdata/go-module-with-testdata")
+
+    assert(
+      mod.path == "testdata/go-module-with-testdata",
+      "module lookup returned unexpected module: " + mod.path,
+    )
+    assert(
+      containsPath(mod.goFiles, "testdata/go-module-with-testdata/embed_test.go"),
+      "go files did not include embed test",
+    )
+    assert(
+      containsPath(mod.goFilesWithSourceIncludes, "testdata/go-module-with-testdata/embed_test.go"),
+      "go files with source includes did not include embed test",
+    )
+    assert(
+      containsPath(mod.goSourceIncludes, "LICENSE"),
+      "source includes did not include workspace-root directive include",
+    )
+    assert(
+      containsPath(mod.goSourceIncludes, "testdata/go-module-with-testdata/embedded-assets/message.txt"),
+      "source includes did not include go:embed file",
+    )
+    assert(
+      mod.source.file("LICENSE").contents.contains("Apache License"),
+      "source directory did not include LICENSE",
+    )
+
+    let replaced = go(version: "1.25").module(ws, "fixtures/go-module-with-replace")
+    assert(
+      containsPath(replaced.goModReplaceIncludes, "fixtures/go-module-with-replace/../replaced-lib/**"),
+      "go.mod replace includes did not include replaced lib",
+    )
+
+    let nested = go(version: "1.25").module(ws, "fixtures/go-module-with-nested-module")
+    assert(
+      containsPath(nested.goFiles, "fixtures/go-module-with-nested-module/parent_test.go"),
+      "nested module parent go files did not include parent test",
+    )
+    assert(
+      containsPath(nested.goFiles, "fixtures/go-module-with-nested-module/nested/include.go") == false,
+      "nested module parent go files included nested module file",
+    )
+
+    null
+  }
+
+  """
   Run go generate in one selected fixture module and verify its changeset.
   """
   pub generateCheck(ws: Workspace!): Void @check {
