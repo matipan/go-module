@@ -29,6 +29,39 @@ type E2e {
   }
 
   """
+  A directive in one module must not affect another module's source mount.
+  """
+  pub perModuleDirectiveCheck(ws: Workspace!): Void @check {
+    go(
+      version: "1.25",
+      selectModules: [
+        "fixtures/go-module-cross-include-a",
+        "fixtures/go-module-cross-include-b",
+      ],
+    ).testAll(ws)
+  }
+
+  """
+  A nested module's directives must not affect its parent module's source mount.
+  """
+  pub nestedModuleDirectiveCheck(ws: Workspace!): Void @check {
+    go(
+      version: "1.25",
+      selectModules: ["fixtures/go-module-with-nested-module"],
+    ).testAll(ws)
+  }
+
+  """
+  A local replace target must be mounted with its non-Go assets.
+  """
+  pub goModReplaceCheck(ws: Workspace!): Void @check {
+    go(
+      version: "1.25",
+      selectModules: ["fixtures/go-module-with-replace"],
+    ).testAll(ws)
+  }
+
+  """
   Run go generate in one selected fixture module and verify its changeset.
   """
   pub generateCheck(ws: Workspace!): Void @check {

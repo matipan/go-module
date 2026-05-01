@@ -1,0 +1,219 @@
+// go.dang runs this helper inside the mounted source tree.
+// It emits workspace include patterns, one per line.
+package main
+
+import (
+	"flag"
+	"fmt"
+	"go/parser"
+	"go/token"
+	"os"
+	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/mod/modfile"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+
+	var (
+		includes []string
+		err      error
+	)
+	switch os.Args[1] {
+	case "source":
+		includes, err = runSource(os.Args[2:])
+	case "gomod":
+		includes, err = runGoMod(os.Args[2:])
+	default:
+		usage()
+		os.Exit(2)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	for _, include := range includes {
+		fmt.Println(include)
+	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  go-includes source --add-prefix=DIR -- FILE.go")
+	fmt.Fprintln(os.Stderr, "  go-includes gomod  --add-prefix=DIR -- go.mod")
+}
+
+func runSource(args []string) ([]string, error) {
+	flags := newFlags("source")
+	prefix := flags.String("add-prefix", "", "prefix to add to relative include patterns")
+	if err := flags.Parse(args); err != nil {
+		return nil, err
+	}
+	if flags.NArg() != 1 {
+		flags.Usage()
+		os.Exit(2)
+	}
+	return sourceIncludes(flags.Arg(0), *prefix)
+}
+
+func runGoMod(args []string) ([]string, error) {
+	flags := newFlags("gomod")
+	prefix := flags.String("add-prefix", "", "prefix to add to relative include patterns")
+	if err := flags.Parse(args); err != nil {
+		return nil, err
+	}
+	if flags.NArg() != 1 {
+		flags.Usage()
+		os.Exit(2)
+	}
+	return goModIncludes(flags.Arg(0), *prefix)
+}
+
+func newFlags(name string) *flag.FlagSet {
+	flags := flag.NewFlagSet(name, flag.ExitOnError)
+	flags.Usage = func() {
+		usage()
+		flags.PrintDefaults()
+	}
+	return flags
+}
+
+func sourceIncludes(filePath, prefix string) ([]string, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filePath, nil, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+
+	var includes []string
+	for _, group := range file.Comments {
+		for _, comment := range group.List {
+			patterns, err := includePatternsFromComment(comment.Text)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", fset.Position(comment.Slash), err)
+			}
+			for _, pattern := range patterns {
+				includes = append(includes, addIncludePrefix(prefix, pattern))
+			}
+		}
+	}
+	return includes, nil
+}
+
+func goModIncludes(filePath, prefix string) ([]string, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	file, err := modfile.Parse(filePath, data, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var includes []string
+	for _, replace := range file.Replace {
+		if replace.New.Version != "" || !isWorkspaceRelativePath(replace.New.Path) {
+			continue
+		}
+		pattern := strings.TrimSuffix(replace.New.Path, "/") + "/**"
+		includes = append(includes, addIncludePrefix(prefix, pattern))
+	}
+	return uniqueStrings(includes), nil
+}
+
+func includePatternsFromComment(comment string) ([]string, error) {
+	if strings.HasPrefix(comment, "//go:embed") {
+		args := strings.TrimPrefix(comment, "//go:embed")
+		if args != "" && !startsWithSpace(args) {
+			return nil, nil
+		}
+		patterns, err := parseDirectiveArgs("go:embed", args)
+		if err != nil {
+			return nil, err
+		}
+		for i, pattern := range patterns {
+			patterns[i] = strings.TrimPrefix(pattern, "all:")
+		}
+		return patterns, nil
+	}
+
+	text := strings.TrimSpace(strings.TrimPrefix(comment, "//"))
+	if !strings.HasPrefix(text, "workspace:include") {
+		return nil, nil
+	}
+	args := strings.TrimPrefix(text, "workspace:include")
+	if args != "" && !startsWithSpace(args) {
+		return nil, nil
+	}
+	return parseDirectiveArgs("workspace:include", args)
+}
+
+func parseDirectiveArgs(name, args string) ([]string, error) {
+	var parsed []string
+	for args = strings.TrimLeftFunc(args, unicode.IsSpace); args != ""; args = strings.TrimLeftFunc(args, unicode.IsSpace) {
+		switch args[0] {
+		case '`', '"':
+			quoted, err := strconv.QuotedPrefix(args)
+			if err != nil {
+				return nil, fmt.Errorf("invalid quoted string in //%s: %s", name, args)
+			}
+			arg, err := strconv.Unquote(quoted)
+			if err != nil {
+				return nil, fmt.Errorf("invalid quoted string in //%s: %s", name, quoted)
+			}
+			parsed = append(parsed, arg)
+			args = args[len(quoted):]
+			if args != "" && !startsWithSpace(args) {
+				return nil, fmt.Errorf("invalid quoted string in //%s: %s", name, args)
+			}
+		default:
+			i := strings.IndexFunc(args, unicode.IsSpace)
+			if i < 0 {
+				i = len(args)
+			}
+			parsed = append(parsed, args[:i])
+			args = args[i:]
+		}
+	}
+	return parsed, nil
+}
+
+func startsWithSpace(s string) bool {
+	r, _ := utf8.DecodeRuneInString(s)
+	return unicode.IsSpace(r)
+}
+
+func addIncludePrefix(prefix, pattern string) string {
+	if strings.HasPrefix(pattern, "/") {
+		return strings.TrimPrefix(pattern, "/")
+	}
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" || prefix == "." {
+		return pattern
+	}
+	return prefix + "/" + pattern
+}
+
+func isWorkspaceRelativePath(path string) bool {
+	return strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../")
+}
+
+func uniqueStrings(values []string) []string {
+	var unique []string
+	seen := map[string]bool{}
+	for _, value := range values {
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		unique = append(unique, value)
+	}
+	return unique
+}
