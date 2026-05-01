@@ -76,15 +76,11 @@ type E2e {
       "go files did not include embed test",
     )
     assert(
-      containsPath(mod.goFilesWithSourceIncludes, "testdata/go-module-with-testdata/embed_test.go"),
-      "go files with source includes did not include embed test",
-    )
-    assert(
-      containsPath(mod.goSourceIncludes, "LICENSE"),
+      containsPath(mod.includeFromGoDirectives, "LICENSE"),
       "source includes did not include workspace-root directive include",
     )
     assert(
-      containsPath(mod.goSourceIncludes, "testdata/go-module-with-testdata/embedded-assets/message.txt"),
+      containsPath(mod.includeFromGoDirectives, "testdata/go-module-with-testdata/embedded-assets/message.txt"),
       "source includes did not include go:embed file",
     )
     assert(
@@ -94,7 +90,7 @@ type E2e {
 
     let replaced = go(version: "1.25").module(ws, "fixtures/go-module-with-replace")
     assert(
-      containsPath(replaced.goModReplaceIncludes, "fixtures/go-module-with-replace/../replaced-lib/**"),
+      containsPath(replaced.includeFromGoModReplace, "fixtures/go-module-with-replace/../replaced-lib/**"),
       "go.mod replace includes did not include replaced lib",
     )
 

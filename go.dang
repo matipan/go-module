@@ -30,9 +30,9 @@ type Go {
   pub selectModule: String = null
 
   """
-  Hardcoded workspace paths needed for Go commands.
+  Baseline workspace paths needed for Go commands before per-module expansion.
   """
-  let include: [String!]! {
+  let includeBase: [String!]! {
     [
       "**/*.go",
       "**/*.c",
@@ -99,19 +99,6 @@ type Go {
   }
 
   """
-  Preserve first occurrence order while removing duplicate strings.
-  """
-  let uniqueStrings(values: [String!]!): [String!]! {
-    values.reduce([] :: [String!]!) { unique, value =>
-      if (unique.filter { existing => existing == value }.length > 0) {
-        unique
-      } else {
-        unique + [value]
-      }
-    }
-  }
-
-  """
   Base container for the Go include helper.
   """
   let goIncludesHelper(source: Directory!): Container! {
@@ -156,49 +143,38 @@ type Go {
             exclude: exclude + nestedModuleExcludes,
           )
           .glob("**/*.go")
-        let goFilesWithSourceIncludes = uniqueStrings(
-          ws.directory("/", include: goFiles, exclude: exclude)
-            .search(pattern: "^\\s*//\\s*(workspace:include|go:embed)(\\s|$)", paths: goFiles)
-            .{filePath}
-            .map { match => match.filePath },
-        )
-        let goSourceIncludes = if (goFiles.length == 0) {
+        let includeFromGoDirectives = if (goFiles.length == 0) {
           [] :: [String!]!
         } else {
           let source = ws.directory("/", include: goFiles, exclude: exclude)
-          if (goFilesWithSourceIncludes.length == 0) {
-            [] :: [String!]!
-          } else {
-            goFilesWithSourceIncludes.reduce([] :: [String!]!) { includes, filePath =>
-              let fileDir = filePath.split("/").dropLast.join("/")
-              includes + goIncludesHelper(source)
-                .withExec(["go", "run", ".", "source", "--add-prefix=" + fileDir, "--", "/src/" + filePath])
-                .stdout
-                .split("\n")
-                .filter { pattern => pattern != "" }
-            }
+          goFiles.reduce([] :: [String!]!) { includes, filePath =>
+            let fileDir = filePath.split("/").dropLast.join("/")
+            includes + goIncludesHelper(source)
+              .withExec(["go", "run", ".", "source", "--add-prefix=" + fileDir, "--", "/src/" + filePath])
+              .stdout
+              .split("\n")
+              .filter { pattern => pattern != "" }
           }
         }
         let goModPath = moduleIncludePath(path, "go.mod")
         let goModSource = ws.directory("/", include: [goModPath], exclude: exclude)
-        let goModReplaceIncludes = goIncludesHelper(goModSource)
+        let includeFromGoModReplace = goIncludesHelper(goModSource)
           .withExec(["go", "run", ".", "gomod", "--add-prefix=" + path, "--", "/src/" + goModPath])
           .stdout
           .split("\n")
           .filter { pattern => pattern != "" }
-        let sourceIncludePatterns = include + goSourceIncludes + goModReplaceIncludes
+        let include = includeBase + includeFromGoDirectives + includeFromGoModReplace
         let source = ws.directory(
           "/",
-          include: sourceIncludePatterns.map { pattern => pattern.trimPrefix("./").trimPrefix("/") },
+          include: include.map { pattern => pattern.trimPrefix("./").trimPrefix("/") },
           exclude: exclude,
         )
         GoModule(
           path: path,
           version: version,
           goFiles: goFiles,
-          goFilesWithSourceIncludes: goFilesWithSourceIncludes,
-          goSourceIncludes: goSourceIncludes,
-          goModReplaceIncludes: goModReplaceIncludes,
+          includeFromGoDirectives: includeFromGoDirectives,
+          includeFromGoModReplace: includeFromGoModReplace,
           source: source,
           testdata: testdata,
         )
@@ -267,19 +243,14 @@ type GoModule {
   pub goFiles: [String!]!
 
   """
-  Go files in this module that contain go:embed or workspace:include directives.
-  """
-  pub goFilesWithSourceIncludes: [String!]!
-
-  """
   Workspace include patterns discovered from this module's Go source directives.
   """
-  pub goSourceIncludes: [String!]!
+  pub includeFromGoDirectives: [String!]!
 
   """
   Workspace include patterns discovered from this module's local go.mod replace directives.
   """
-  pub goModReplaceIncludes: [String!]!
+  pub includeFromGoModReplace: [String!]!
 
   """
   Filtered workspace source mounted for Go commands.
