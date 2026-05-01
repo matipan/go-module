@@ -30,24 +30,6 @@ type Go {
   pub selectModule: String = null
 
   """
-  Baseline workspace paths needed for Go commands before per-module expansion.
-  """
-  let includeBase: [String!]! {
-    [
-      "**/*.go",
-      "**/*.c",
-      "**/*.h",
-      "**/*.s",
-      "**/*.S",
-      "**/*.syso",
-      "**/go.mod",
-      "**/go.sum",
-      "**/go.work",
-      "**/go.work.sum",
-    ] + includeExtraFiles
-  }
-
-  """
   Hardcoded workspace paths to omit from Go command inputs.
   """
   let exclude: [String!]! {
@@ -163,7 +145,18 @@ type Go {
           .stdout
           .split("\n")
           .filter { pattern => pattern != "" }
-        let include = includeBase + includeFromGoDirectives + includeFromGoModReplace
+        let include = [
+          "**/*.go",
+          "**/*.c",
+          "**/*.h",
+          "**/*.s",
+          "**/*.S",
+          "**/*.syso",
+          "**/go.mod",
+          "**/go.sum",
+          "**/go.work",
+          "**/go.work.sum",
+        ] + includeExtraFiles + includeFromGoDirectives + includeFromGoModReplace
         let source = ws.directory(
           "/",
           include: include.map { pattern => pattern.trimPrefix("./").trimPrefix("/") },
