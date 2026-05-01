@@ -177,7 +177,7 @@ type Go {
           .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
           .withDirectory("/src", goFileDirectory(ws, files))
           .withFile("/scan-go-embeds.go", currentModule.source.file(".dagger/scripts/go-embed-includes.go"))
-          .withExec(["go", "run", "/scan-go-embeds.go", "--"] + files)
+          .withExec(["go", "run", "/scan-go-embeds.go"])
           .stdout
           .split("\n")
           .filter { pattern => pattern != "" }

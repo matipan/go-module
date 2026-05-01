@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -13,20 +14,28 @@ import (
 )
 
 func main() {
-	seenFiles := map[string]bool{}
 	seenIncludes := map[string]bool{}
-	for _, filePath := range os.Args[1:] {
-		if filePath == "--" || seenFiles[filePath] {
-			continue
-		}
-		seenFiles[filePath] = true
-		patterns, err := embedPatterns(filePath)
+	if err := filepath.WalkDir(".", func(filePath string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", filePath, err)
-			os.Exit(1)
+			return err
+		}
+		if entry.IsDir() {
+			if filepath.Ext(filePath) == ".go" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(filePath) != ".go" {
+			return nil
+		}
+
+		workspacePath := strings.TrimPrefix(filepath.ToSlash(filePath), "./")
+		patterns, err := embedPatterns(workspacePath)
+		if err != nil {
+			return fmt.Errorf("%s: %w", workspacePath, err)
 		}
 		for _, pattern := range patterns {
-			for _, include := range includePatterns(filePath, pattern) {
+			for _, include := range includePatterns(workspacePath, pattern) {
 				if include == "" || seenIncludes[include] {
 					continue
 				}
@@ -34,6 +43,10 @@ func main() {
 				fmt.Println(include)
 			}
 		}
+		return nil
+	}); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
@@ -45,7 +58,7 @@ func embedPatterns(filePath string) ([]string, error) {
 
 	var s scanner.Scanner
 	s.Init(strings.NewReader(string(src)))
-	s.Mode = scanner.ScanComments
+	s.Mode = scanner.GoTokens &^ scanner.SkipComments
 
 	var patterns []string
 	for tok := s.Scan(); tok != scanner.EOF; tok = s.Scan() {
