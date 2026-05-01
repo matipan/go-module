@@ -64,12 +64,17 @@ type Tool {
   }
 
   pub artifacts(ws: Workspace!): [Artifact!]! {
-    artifactPaths(ws).map { path => artifact(path) }
+    artifactPaths(ws).map { path => artifact(ws, path, findUp: false) }
   }
 
-  pub artifact(path: String!): Artifact! {
+  pub artifact(ws: Workspace!, path: String!, findUp: Boolean! = true): Artifact! {
+    let artifactPath = if (findUp) {
+      findArtifactPath(ws, path)
+    } else {
+      path
+    }
     Artifact(
-      path: path,
+      path: artifactPath,
       version: version,
     )
   }
@@ -96,16 +101,38 @@ type Artifact {
 The pattern is:
 
 - `artifacts(ws)` scans for paths.
-- `artifacts(ws)` calls `artifact(path)` for each path.
-- `artifact(path)` constructs the child object from stored inputs.
+- `artifacts(ws)` calls `artifact(ws, path, findUp: false)` for each path.
+- `artifact(ws, path)` snaps user paths to the containing artifact by default
+  when the domain has that concept.
+- `artifact(..., findUp: false)` constructs the child object directly from a
+  known artifact root.
 - Inputs are fields.
 - Derived values are cascading lazy fields.
-- Direct lookup does not need to rescan every artifact just to validate one
-  requested path.
+- Direct lookup should not rescan every artifact just to validate one requested
+  path. If it needs lookup, make the behavior explicit and useful.
 
-If compatibility or schema ergonomics require a context argument on direct
-lookup, keep it boring. It should still construct the child object, not perform
-a whole collection scan.
+Prefer a behavioral name like `findUp` over a vague flag like `validate`.
+`findUp` tells users that any child path can resolve to its containing artifact.
+Discovery should pass `findUp: false` because it already has exact artifact
+roots.
+
+## Native API Reality Check
+
+Do not trust the intuitive version of a native helper's contract. Verify the
+exact argument shape before simplifying around it.
+
+Rules:
+
+- Test the annoying path shapes, not just the happy path: root directory,
+  artifact root, nested directory, and missing path.
+- Remember that a pruned `Directory` is the whole world seen by downstream
+  directory methods. If you build `ws.directory("/", include: ["**/go.mod"])`,
+  then ordinary source files do not exist in that directory.
+- `Directory.findUp(name, start)` starts from a directory. It is fine for a
+  module API to inherit that limitation; do not add file-path support unless
+  the API explicitly promises file paths.
+- If a native helper needs preconditions, keep that logic local to the call
+  site and say why. Do not hide it behind a one-use helper.
 
 ## Cascading Field Style
 
@@ -168,11 +195,11 @@ The root object should usually offer two entry points for child objects:
 ```dang
 pub artifacts(ws: Workspace!): [Artifact!]!
 
-pub artifact(path: String!): Artifact!
+pub artifact(ws: Workspace!, path: String!, findUp: Boolean! = true): Artifact!
 ```
 
-Use `artifacts(ws)` for discovery. Use `artifact(path)` when a caller already
-knows which object they want.
+Use `artifacts(ws)` for discovery. Use `artifact(ws, path)` when a caller has a
+path and wants the containing object.
 
 Object-specific facts then hang off the child object:
 

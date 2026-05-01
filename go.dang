@@ -40,11 +40,11 @@ type Go {
   }
 
   """
-  Discover go.mod paths selected by selectModule or selectModules.
+  Scan the workspace for Go modules.
   """
-  let goModPaths(ws: Workspace!): [String!]! {
+  pub modules(ws: Workspace!): [GoModule!]! {
     if (selectModules != null and selectModules.length == 0) {
-      [] :: [String!]!
+      [] :: [GoModule!]!
     } else {
       let includePaths = if (selectModules != null) {
         selectModules.map { modulePath =>
@@ -58,34 +58,37 @@ type Go {
       ws
         .directory("/", include: includePaths, exclude: exclude)
         .glob("**/go.mod")
+        .map { modPath =>
+          module(
+            ws,
+            if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") },
+            findUp: false,
+          )
+        }
     }
   }
 
   """
-  Module directory path for a go.mod file.
-  """
-  let modulePathFromGoMod(modPath: String!): String! {
-    let rawPath = modPath.trimSuffix("go.mod").trimSuffix("/")
-    if (rawPath == "") { "." } else { rawPath }
-  }
+  Return the Go module containing a workspace path.
 
+  By default, path may point at a module root or subdirectory inside a Go
+  module. Set findUp to false when path is already a module root and no
+  workspace lookup is needed.
   """
-  Scan the workspace for Go modules.
-  """
-  pub modules(ws: Workspace!): [GoModule!]! {
-    goModPaths(ws)
-      .map { modPath =>
-        let path = modulePathFromGoMod(modPath)
-        module(ws, path)
-      }
-  }
-
-  """
-  Return a Go module handle for a workspace-relative module path.
-  """
-  pub module(ws: Workspace!, path: String!): GoModule! {
+  pub module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoModule! {
     GoModule(
-      path: path,
+      path: if (findUp) {
+        let goModPath = ws
+          .directory("/", exclude: exclude)
+          .findUp("go.mod", path)
+        if (goModPath == null) {
+          raise "no Go module found containing path: " + path
+        } else if (goModPath == "go.mod") { "." } else {
+          goModPath.trimSuffix("/go.mod")
+        }
+      } else {
+        path
+      },
       version: version,
       includeExtraFiles: includeExtraFiles,
       exclude: exclude,
@@ -183,8 +186,7 @@ type GoModule {
       .directory("/", include: ["**/go.mod"], exclude: exclude)
       .glob("**/go.mod")
       .map { modPath =>
-        let rawPath = modPath.trimSuffix("go.mod").trimSuffix("/")
-        if (rawPath == "") { "." } else { rawPath }
+        if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") }
       }
       .filter { nestedPath =>
         if (path == ".") {
