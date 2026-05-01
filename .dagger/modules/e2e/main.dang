@@ -72,10 +72,6 @@ type E2e {
       "module lookup returned unexpected module: " + mod.path,
     )
     assert(
-      containsPath(mod.goFiles, "testdata/go-module-with-testdata/embed_test.go"),
-      "go files did not include embed test",
-    )
-    assert(
       containsPath(mod.includeFromGoDirectives, "LICENSE"),
       "source includes did not include workspace-root directive include",
     )
@@ -93,17 +89,6 @@ type E2e {
       containsPath(replaced.includeFromGoModReplace, "fixtures/go-module-with-replace/../replaced-lib/**"),
       "go.mod replace includes did not include replaced lib",
     )
-
-    let nested = go(version: "1.25").module(ws, "fixtures/go-module-with-nested-module")
-    assert(
-      containsPath(nested.goFiles, "fixtures/go-module-with-nested-module/parent_test.go"),
-      "nested module parent go files did not include parent test",
-    )
-    assert(
-      containsPath(nested.goFiles, "fixtures/go-module-with-nested-module/nested/include.go") == false,
-      "nested module parent go files included nested module file",
-    )
-
     null
   }
 

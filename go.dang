@@ -159,13 +159,12 @@ type Go {
         ] + includeExtraFiles + includeFromGoDirectives + includeFromGoModReplace
         let source = ws.directory(
           "/",
-          include: include.map { pattern => pattern.trimPrefix("./").trimPrefix("/") },
+          include: include,
           exclude: exclude,
         )
         GoModule(
           path: path,
           version: version,
-          goFiles: goFiles,
           includeFromGoDirectives: includeFromGoDirectives,
           includeFromGoModReplace: includeFromGoModReplace,
           source: source,
@@ -229,11 +228,6 @@ type GoModule {
   Go version to use.
   """
   let version: String!
-
-  """
-  Go files in this module checked for go:embed and workspace:include directives.
-  """
-  pub goFiles: [String!]!
 
   """
   Workspace include patterns discovered from this module's Go source directives.
