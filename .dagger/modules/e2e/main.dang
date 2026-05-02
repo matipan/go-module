@@ -81,6 +81,14 @@ type E2e {
       containsPath(withExtraFiles.includeExtraFiles, "LICENSE"),
       "module did not expose inherited extra include files",
     )
+    assert(
+      containsPath(mod.includeBase, "testdata/go-module-with-testdata/**/*.go"),
+      "module base includes did not include module-scoped Go pattern",
+    )
+    assert(
+      containsPath(mod.includeBase, "**/*.go") == false,
+      "module base includes exposed workspace-wide Go pattern",
+    )
 
     let optInTool = go(version: "1.25", goModulesMustOptIn: true)
     let optedIn = optInTool.module(ws, "testdata/go-module-with-testdata")
@@ -118,6 +126,15 @@ type E2e {
     assert(
       mod.source(ws).file("LICENSE").contents.contains("Apache License"),
       "source directory did not include LICENSE",
+    )
+    let sourceGoFiles = mod.source(ws).glob("**/*.go")
+    assert(
+      containsPath(sourceGoFiles, "testdata/go-module-with-testdata/embed_test.go"),
+      "source directory did not include module Go file",
+    )
+    assert(
+      containsPath(sourceGoFiles, "fixtures/go-module-cross-include-b/isolation_test.go") == false,
+      "source directory included Go file from another module",
     )
     assert(
       mod

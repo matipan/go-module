@@ -241,21 +241,28 @@ type GoModule {
   }
 
   """
+  Built-in workspace include patterns for this module's own Go source files.
+  """
+  pub includeBase: [String!]! {
+    [
+      subpath("**/*.go"),
+      subpath("**/*.c"),
+      subpath("**/*.h"),
+      subpath("**/*.s"),
+      subpath("**/*.S"),
+      subpath("**/*.syso"),
+      subpath("**/go.mod"),
+      subpath("**/go.sum"),
+      subpath("**/go.work"),
+      subpath("**/go.work.sum"),
+    ]
+  }
+
+  """
   Final workspace include patterns used to build this module's source directory.
   """
   pub include(ws: Workspace!): [String!]! {
-    [
-      "**/*.go",
-      "**/*.c",
-      "**/*.h",
-      "**/*.s",
-      "**/*.S",
-      "**/*.syso",
-      "**/go.mod",
-      "**/go.sum",
-      "**/go.work",
-      "**/go.work.sum",
-    ] + includeExtraFiles + includeFromGoDirectives(ws) + includeFromGoModReplace(ws)
+    includeBase + includeExtraFiles + includeFromGoDirectives(ws) + includeFromGoModReplace(ws)
   }
 
   """
