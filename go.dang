@@ -349,7 +349,7 @@ type GoModule {
     base
       .withDirectory(".", source(ws))
       .withWorkdir(path)
-      .withExec(["go", "generate", "./..."])
+      .withExec(["go", "generate", "./..."], experimentalPrivilegedNesting: true)
   }
 
   """
