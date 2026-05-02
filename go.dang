@@ -227,17 +227,23 @@ type GoModule {
   }
 
   """
-  Workspace include patterns discovered from this module's local go.mod replace
-  directives.
+  Workspace include patterns for local replace targets found in go.mod files
+  selected by includeBase, includeExtraFiles, and includeFromGoDirectives.
   """
   pub includeFromGoModReplace(ws: Workspace!): [String!]! {
-    let goModPath = subpath("go.mod")
-    let goModSource = ws.directory("/", include: [goModPath])
-    goIncludesHelper(goModSource)
-      .withExec(["go", "run", ".", "gomod", "--add-prefix=" + path, "--", "/src/" + goModPath])
-      .stdout
-      .split("\n")
-      .filter { pattern => pattern != "" }
+    let goModPaths = ws
+      .directory("/", include: includeBase + includeExtraFiles + includeFromGoDirectives(ws))
+      .glob("**/go.mod")
+    if (goModPaths.length == 0) {
+      [] :: [String!]!
+    } else {
+      goIncludesHelper(directory)
+        .withEnvVariable("DAGGER_GO_HELPER_WORKSPACE_ID", toString(ws))
+        .withExec(["go", "run", ".", "gomod", "--"] + goModPaths, experimentalPrivilegedNesting: true)
+        .stdout
+        .split("\n")
+        .filter { pattern => pattern != "" }
+    }
   }
 
   """

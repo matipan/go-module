@@ -150,6 +150,16 @@ type E2e {
       containsPath(replaced.includeFromGoModReplace(ws), "fixtures/go-module-with-replace/../replaced-lib/**"),
       "go.mod replace includes did not include replaced lib",
     )
+
+    let includedGoMod = go(version: "1.25").module(ws, "fixtures/go-module-with-included-gomod-replace/sdk/go")
+    assert(
+      containsPath(includedGoMod.includeFromGoModReplace(ws), "fixtures/go-module-with-included-gomod-replace/./engine/distconsts/**"),
+      "go.mod replace includes did not include replace target from included parent go.mod",
+    )
+    assert(
+      containsPath(includedGoMod.includeFromGoModReplace(ws), "fixtures/go-module-with-included-gomod-replace/engine/distconsts/../leaf/**"),
+      "go.mod replace includes did not include recursively discovered replace target",
+    )
     null
   }
 
@@ -157,6 +167,11 @@ type E2e {
   Run go generate in one opted-in fixture module and verify its changeset.
   """
   pub generateCheck(ws: Workspace!): Void @check {
+    go(version: "1.25")
+      .module(ws, "fixtures/go-module-with-included-gomod-replace/sdk/go")
+      .generate(ws)
+      .sync
+
     let changes = go(
       version: "1.25",
       goModulesMustOptIn: true,

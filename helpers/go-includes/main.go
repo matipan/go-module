@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"go/parser"
@@ -12,8 +13,6 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
-
-	"golang.org/x/mod/modfile"
 )
 
 func main() {
@@ -47,7 +46,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  go-includes source --add-prefix=DIR -- FILE.go")
-	fmt.Fprintln(os.Stderr, "  go-includes gomod  --add-prefix=DIR -- go.mod")
+	fmt.Fprintln(os.Stderr, "  go-includes gomod  [--no-recursive] -- go.mod [go.mod...]")
 }
 
 func runSource(args []string) ([]string, error) {
@@ -65,15 +64,15 @@ func runSource(args []string) ([]string, error) {
 
 func runGoMod(args []string) ([]string, error) {
 	flags := newFlags("gomod")
-	prefix := flags.String("add-prefix", "", "prefix to add to relative include patterns")
+	noRecursive := flags.Bool("no-recursive", false, "only scan go.mod files passed on the command line")
 	if err := flags.Parse(args); err != nil {
 		return nil, err
 	}
-	if flags.NArg() != 1 {
+	if flags.NArg() == 0 {
 		flags.Usage()
 		os.Exit(2)
 	}
-	return goModIncludes(flags.Arg(0), *prefix)
+	return goModIncludes(context.Background(), flags.Args(), !*noRecursive, workspaceGoModContents)
 }
 
 func newFlags(name string) *flag.FlagSet {
@@ -105,27 +104,6 @@ func sourceIncludes(filePath, prefix string) ([]string, error) {
 		}
 	}
 	return includes, nil
-}
-
-func goModIncludes(filePath, prefix string) ([]string, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-	file, err := modfile.Parse(filePath, data, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var includes []string
-	for _, replace := range file.Replace {
-		if replace.New.Version != "" || !isWorkspaceRelativePath(replace.New.Path) {
-			continue
-		}
-		pattern := strings.TrimSuffix(replace.New.Path, "/") + "/**"
-		includes = append(includes, addIncludePrefix(prefix, pattern))
-	}
-	return uniqueStrings(includes), nil
 }
 
 func includePatternsFromComment(comment string) ([]string, error) {
@@ -199,21 +177,4 @@ func addIncludePrefix(prefix, pattern string) string {
 		return pattern
 	}
 	return prefix + "/" + pattern
-}
-
-func isWorkspaceRelativePath(path string) bool {
-	return strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../")
-}
-
-func uniqueStrings(values []string) []string {
-	var unique []string
-	seen := map[string]bool{}
-	for _, value := range values {
-		if seen[value] {
-			continue
-		}
-		seen[value] = true
-		unique = append(unique, value)
-	}
-	return unique
 }

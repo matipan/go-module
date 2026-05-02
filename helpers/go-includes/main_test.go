@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -39,9 +40,8 @@ var embedded embed.FS
 }
 
 func TestGoModIncludes(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "go.mod")
-	err := os.WriteFile(filePath, []byte(`module example.com/app
+	got, err := goModIncludes(context.Background(), []string{"app/go.mod"}, false, staticGoMods(map[string]string{
+		"app/go.mod": `module example.com/app
 
 go 1.25
 
@@ -49,12 +49,8 @@ replace example.com/lib => ../lib
 replace example.com/other v1.2.3 => ./other
 replace example.com/remote => example.com/fork v1.2.3
 replace example.com/absolute => /tmp/absolute
-`), 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := goModIncludes(filePath, "app")
+`,
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,10 +63,65 @@ replace example.com/absolute => /tmp/absolute
 	}
 }
 
+func TestGoModIncludesRecursive(t *testing.T) {
+	got, err := goModIncludes(context.Background(), []string{"app/go.mod"}, true, staticGoMods(map[string]string{
+		"app/go.mod": `module example.com/app
+
+go 1.25
+
+replace example.com/lib => ../lib
+`,
+		"lib/go.mod": `module example.com/lib
+
+go 1.25
+
+replace example.com/leaf => ./leaf
+`,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"app/../lib/**",
+		"lib/./leaf/**",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("includes mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestGoModIncludesStopsAtMissingRecursiveTarget(t *testing.T) {
+	got, err := goModIncludes(context.Background(), []string{"app/go.mod"}, true, staticGoMods(map[string]string{
+		"app/go.mod": `module example.com/app
+
+go 1.25
+
+replace example.com/lib => ../lib
+`,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"app/../lib/**"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("includes mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func TestAbsoluteIncludesIgnorePrefix(t *testing.T) {
 	got := addIncludePrefix("pkg", "/from-root.txt")
 	if got != "from-root.txt" {
 		t.Fatalf("unexpected include: %q", got)
+	}
+}
+
+func staticGoMods(files map[string]string) goModReader {
+	return func(_ context.Context, path string) ([]byte, error) {
+		data, ok := files[path]
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+		return []byte(data), nil
 	}
 }
 
