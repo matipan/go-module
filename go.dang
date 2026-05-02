@@ -118,14 +118,14 @@ type GoModule {
   pub path: String!
 
   """
-  Go version to use.
+  Go version used by this module's test and generate containers.
   """
-  let version: String!
+  pub version: String!
 
   """
-  Extra workspace files to include when running Go commands.
+  Extra workspace-root include patterns mounted for this module's Go commands.
   """
-  let includeExtraFiles: [String!]!
+  pub includeExtraFiles: [String!]!
 
   """
   Whether this module requires an opt-in marker before tests or generate run.
@@ -269,9 +269,9 @@ type GoModule {
   }
 
   """
-  Module testdata directories mounted only while running tests.
+  Workspace testdata directories mounted while testing this module.
   """
-  let testData(ws: Workspace!): Directory! {
+  pub testData(ws: Workspace!): Directory! {
     ws.directory(
       "/",
       include: [

@@ -62,11 +62,24 @@ type E2e {
       mod.path == "testdata/go-module-with-testdata",
       "module lookup did not snap to containing module: " + mod.path,
     )
+    assert(
+      mod.version == "1.25",
+      "module did not expose inherited Go version: " + mod.version,
+    )
 
     let direct = go(version: "1.25").module(ws, "testdata/go-module-with-testdata/testdata", findUp: false)
     assert(
       direct.path == "testdata/go-module-with-testdata/testdata",
       "module lookup unexpectedly snapped with findUp false: " + direct.path,
+    )
+
+    let withExtraFiles = go(
+      version: "1.25",
+      includeExtraFiles: ["LICENSE"],
+    ).module(ws, "testdata/go-module-with-testdata")
+    assert(
+      containsPath(withExtraFiles.includeExtraFiles, "LICENSE"),
+      "module did not expose inherited extra include files",
     )
 
     let optInTool = go(version: "1.25", goModulesMustOptIn: true)
@@ -105,6 +118,14 @@ type E2e {
     assert(
       mod.source(ws).file("LICENSE").contents.contains("Apache License"),
       "source directory did not include LICENSE",
+    )
+    assert(
+      mod
+        .testData(ws)
+        .file("testdata/go-module-with-testdata/testdata/fixture.txt")
+        .contents
+        .contains("mounted from testdata"),
+      "testData directory did not include module testdata fixture",
     )
 
     let replaced = go(version: "1.25").module(ws, "fixtures/go-module-with-replace")
