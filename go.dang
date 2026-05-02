@@ -29,21 +29,11 @@ type Go {
   pub goModuleOptInFilename: String! = ".dagger-go-opt-in"
 
   """
-  Hardcoded workspace paths to omit from Go command inputs.
-  """
-  let exclude: [String!]! {
-    [
-      "vendor/",
-      "**/vendor/",
-    ]
-  }
-
-  """
   Return every Go module discovered from workspace go.mod files.
   """
   pub modules(ws: Workspace!): [GoModule!]! {
     ws
-      .directory("/", include: ["**/go.mod"], exclude: exclude)
+      .directory("/", include: ["**/go.mod"])
       .glob("**/go.mod")
       .map { modPath =>
         module(
@@ -64,7 +54,8 @@ type Go {
     GoModule(
       path: if (findUp) {
         let goModPath = ws
-          .directory("/", exclude: exclude)
+          .directory("/", include: ["**/go.mod"])
+          .withDirectory(path, directory)
           .findUp("go.mod", path)
         if (goModPath == null) {
           raise "no Go module found containing path: " + path
@@ -76,7 +67,6 @@ type Go {
       },
       version: version,
       includeExtraFiles: includeExtraFiles,
-      exclude: exclude,
       mustOptIn: goModulesMustOptIn,
       optInFilename: goModuleOptInFilename,
     )
@@ -138,11 +128,6 @@ type GoModule {
   let includeExtraFiles: [String!]!
 
   """
-  Workspace paths to omit from Go command inputs.
-  """
-  let exclude: [String!]!
-
-  """
   Whether this module requires an opt-in marker before tests or generate run.
   """
   pub mustOptIn: Boolean!
@@ -182,7 +167,7 @@ type GoModule {
   """
   pub optedIn(ws: Workspace!): Boolean! {
     ws
-      .directory("/", include: [includePath(optInFilename)], exclude: exclude)
+      .directory("/", include: [includePath(optInFilename)])
       .glob(includePath(optInFilename))
       .length > 0
   }
@@ -200,7 +185,7 @@ type GoModule {
   """
   pub includeFromGoDirectives(ws: Workspace!): [String!]! {
     let nestedModuleExcludes = ws
-      .directory("/", include: ["**/go.mod"], exclude: exclude)
+      .directory("/", include: ["**/go.mod"])
       .glob("**/go.mod")
       .map { modPath =>
         if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") }
@@ -223,13 +208,13 @@ type GoModule {
       .directory(
         "/",
         include: [includePath("**/*.go")],
-        exclude: exclude + nestedModuleExcludes,
+        exclude: nestedModuleExcludes,
       )
       .glob("**/*.go")
     if (goFiles.length == 0) {
       [] :: [String!]!
     } else {
-      let source = ws.directory("/", include: goFiles, exclude: exclude)
+      let source = ws.directory("/", include: goFiles)
       goFiles.reduce([] :: [String!]!) { includes, filePath =>
         let fileDir = filePath.split("/").dropLast.join("/")
         includes + goIncludesHelper(source)
@@ -247,7 +232,7 @@ type GoModule {
   """
   pub includeFromGoModReplace(ws: Workspace!): [String!]! {
     let goModPath = includePath("go.mod")
-    let goModSource = ws.directory("/", include: [goModPath], exclude: exclude)
+    let goModSource = ws.directory("/", include: [goModPath])
     goIncludesHelper(goModSource)
       .withExec(["go", "run", ".", "gomod", "--add-prefix=" + path, "--", "/src/" + goModPath])
       .stdout
@@ -280,7 +265,6 @@ type GoModule {
     ws.directory(
       "/",
       include: include(ws),
-      exclude: exclude,
     )
   }
 
@@ -294,7 +278,6 @@ type GoModule {
         includePath("testdata/**"),
         includePath("**/testdata/**"),
       ],
-      exclude: exclude,
     )
   }
 
@@ -326,7 +309,7 @@ type GoModule {
   pub generate(ws: Workspace!): Directory! {
     if (shouldIgnore(ws)) {
       ws
-        .directory("/", include: [includePath("**")], exclude: exclude)
+        .directory("/", include: [includePath("**")])
         .directory(path)
     } else {
       generateExec(ws).directory(".")
@@ -349,7 +332,7 @@ type GoModule {
   let testExec(ws: Workspace!): Container! {
     if (shouldIgnore(ws)) {
       base
-        .withDirectory(".", ws.directory("/", include: [includePath("go.mod")], exclude: exclude))
+        .withDirectory(".", ws.directory("/", include: [includePath("go.mod")]))
         .withWorkdir(path)
     } else {
       base
