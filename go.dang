@@ -6,28 +6,27 @@ https://golang.org
 """
 type Go {
   """
-  Go version to use.
+  Go version used for test and generate commands.
   """
   pub version: String! = "1.26"
 
   """
-  Extra workspace files to include when running Go commands.
-  Use this for project-specific fixtures, generator inputs, or other files
-  not covered by the built-in Go patterns.
+  Extra workspace-root include patterns mounted for each module's Go commands.
+  Use this for fixtures, generator inputs, or other files not covered by the
+  built-in Go patterns.
   """
   pub includeExtraFiles: [String!]! = []
 
   """
-  Go module path globs to include when discovering modules.
-  When unset, every discovered module is included.
+  Require each Go module to contain the opt-in marker before tests or generate run.
   """
-  pub selectModules: [String!] = null
+  pub goModulesMustOptIn: Boolean! = false
 
   """
-  Single Go module path glob to include when legacy callers cannot pass arrays.
-  Ignored when selectModules is set.
+  Opt-in marker filename checked at each Go module root.
+  Only used when goModulesMustOptIn is true.
   """
-  pub selectModule: String = null
+  pub goModuleOptInFilename: String! = ".dagger-go-opt-in"
 
   """
   Hardcoded workspace paths to omit from Go command inputs.
@@ -40,40 +39,26 @@ type Go {
   }
 
   """
-  Scan the workspace for Go modules.
+  Return every Go module discovered from workspace go.mod files.
   """
   pub modules(ws: Workspace!): [GoModule!]! {
-    if (selectModules != null and selectModules.length == 0) {
-      [] :: [GoModule!]!
-    } else {
-      let includePaths = if (selectModules != null) {
-        selectModules.map { modulePath =>
-          (modulePath.trimSuffix("/") + "/go.mod").trimPrefix("./").trimPrefix("/")
-        }
-      } else if (selectModule != null) {
-        [(selectModule.trimSuffix("/") + "/go.mod").trimPrefix("./").trimPrefix("/")]
-      } else {
-        ["**/go.mod"]
+    ws
+      .directory("/", include: ["**/go.mod"], exclude: exclude)
+      .glob("**/go.mod")
+      .map { modPath =>
+        module(
+          ws,
+          if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") },
+          findUp: false,
+        )
       }
-      ws
-        .directory("/", include: includePaths, exclude: exclude)
-        .glob("**/go.mod")
-        .map { modPath =>
-          module(
-            ws,
-            if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") },
-            findUp: false,
-          )
-        }
-    }
   }
 
   """
   Return the Go module containing a workspace path.
 
-  By default, path may point at a module root or subdirectory inside a Go
-  module. Set findUp to false when path is already a module root and no
-  workspace lookup is needed.
+  By default, path may be a module root or a directory inside a module. Set
+  findUp to false when path is already a module root and no lookup is needed.
   """
   pub module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoModule! {
     GoModule(
@@ -92,11 +77,14 @@ type Go {
       version: version,
       includeExtraFiles: includeExtraFiles,
       exclude: exclude,
+      mustOptIn: goModulesMustOptIn,
+      optInFilename: goModuleOptInFilename,
     )
   }
 
   """
   Run tests in every discovered Go module.
+  When opt-in is required, modules without the marker are skipped.
   """
   pub testAll(ws: Workspace!): Void @check {
     let layers = modules(ws).reduce(directory) { layers, mod =>
@@ -106,8 +94,8 @@ type Go {
       )
     }
     # FIXME: replace this when Dagger can directly run multiple containers in
-    # parallel. For now, merge one file from each Go module's test container
-    # into a directory and sync it to force every testExec to run.
+    # parallel. For now, merge one file from each module's test container into
+    # a directory and sync it to force every module test command to run.
 
     layers.sync
     null
@@ -115,14 +103,15 @@ type Go {
 
   """
   Run go generate in every discovered Go module.
+  When opt-in is required, modules without the marker are skipped.
   """
   pub generate(ws: Workspace!): Changeset! @generate {
-    let mods = modules(ws)
+    let mods = modules(ws).filter { mod => mod.shouldIgnore(ws) == false }
     let before = mods.reduce(directory) { before, mod =>
       before.withDirectory(mod.path, mod.source(ws).directory(mod.path))
     }
     let after = mods.reduce(before) { after, mod =>
-      after.withDirectory(mod.path, mod.generate(ws))
+      after.withDirectory(mod.path, mod.generateExec(ws).directory("."))
     }
     after.changes(before)
   }
@@ -130,11 +119,11 @@ type Go {
 }
 
 """
-A Go module handle rooted at a workspace-relative path.
+A Go module rooted at a workspace-relative path.
 """
 type GoModule {
   """
-  Path of the module directory in the workspace.
+  Workspace-relative path of this module root.
   """
   pub path: String!
 
@@ -152,6 +141,16 @@ type GoModule {
   Workspace paths to omit from Go command inputs.
   """
   let exclude: [String!]!
+
+  """
+  Whether this module requires an opt-in marker before tests or generate run.
+  """
+  pub mustOptIn: Boolean!
+
+  """
+  Marker filename used when this module must opt in.
+  """
+  let optInFilename: String!
 
   """
   Resolve a module-relative pattern to the workspace root.
@@ -179,7 +178,25 @@ type GoModule {
   }
 
   """
-  Workspace include patterns discovered from this module's Go source directives.
+  Whether this module root contains the configured opt-in marker.
+  """
+  pub optedIn(ws: Workspace!): Boolean! {
+    ws
+      .directory("/", include: [includePath(optInFilename)], exclude: exclude)
+      .glob(includePath(optInFilename))
+      .length > 0
+  }
+
+  """
+  Whether tests and generate should skip this module under the current opt-in policy.
+  """
+  pub shouldIgnore(ws: Workspace!): Boolean! {
+    mustOptIn and optedIn(ws) == false
+  }
+
+  """
+  Workspace include patterns discovered from go:embed and workspace:include
+  directives in this module's Go files.
   """
   pub includeFromGoDirectives(ws: Workspace!): [String!]! {
     let nestedModuleExcludes = ws
@@ -225,7 +242,8 @@ type GoModule {
   }
 
   """
-  Workspace include patterns discovered from this module's local go.mod replace directives.
+  Workspace include patterns discovered from this module's local go.mod replace
+  directives.
   """
   pub includeFromGoModReplace(ws: Workspace!): [String!]! {
     let goModPath = includePath("go.mod")
@@ -238,7 +256,7 @@ type GoModule {
   }
 
   """
-  Final workspace include patterns for this module's Go command source.
+  Final workspace include patterns used to build this module's source directory.
   """
   pub include(ws: Workspace!): [String!]! {
     [
@@ -256,7 +274,7 @@ type GoModule {
   }
 
   """
-  Filtered workspace source mounted for Go commands.
+  Workspace source mounted for this module's Go commands.
   """
   pub source(ws: Workspace!): Directory! {
     ws.directory(
@@ -267,7 +285,7 @@ type GoModule {
   }
 
   """
-  Filtered test fixture files mounted only while running tests.
+  Module testdata directories mounted only while running tests.
   """
   let testData(ws: Workspace!): Directory! {
     ws.directory(
@@ -281,7 +299,7 @@ type GoModule {
   }
 
   """
-  Base container for Go commands.
+  Base Go container before source files and commands are added.
   """
   pub base: Container! {
     container
@@ -294,6 +312,7 @@ type GoModule {
 
   """
   Run tests in this module.
+  When opt-in is required and this module has no marker, tests are skipped.
   """
   pub test(ws: Workspace!): Void @check {
     testExec(ws).sync
@@ -302,27 +321,46 @@ type GoModule {
 
   """
   Module directory after running go generate.
+  When opt-in is required and this module has no marker, the source is returned unchanged.
   """
   pub generate(ws: Workspace!): Directory! {
+    if (shouldIgnore(ws)) {
+      ws
+        .directory("/", include: [includePath("**")], exclude: exclude)
+        .directory(path)
+    } else {
+      generateExec(ws).directory(".")
+    }
+  }
+
+  """
+  Container state after running go generate in this module.
+  """
+  let generateExec(ws: Workspace!): Container! {
     base
       .withDirectory(".", source(ws))
       .withWorkdir(path)
       .withExec(["go", "generate", "./..."])
-      .directory(".")
   }
 
   """
-  Container state after running this module's test check.
+  Container synced by this module's test check.
   """
   let testExec(ws: Workspace!): Container! {
-    base
-      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@main"])
-      .withDirectory(".", source(ws))
-      .withDirectory(".", testData(ws))
-      # Nested Dagger clients find the workspace boundary by walking up to .git.
-      .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
-      .withWorkdir(path)
-      .withExec(["otelgotest", "./..."], experimentalPrivilegedNesting: true)
+    if (shouldIgnore(ws)) {
+      base
+        .withDirectory(".", ws.directory("/", include: [includePath("go.mod")], exclude: exclude))
+        .withWorkdir(path)
+    } else {
+      base
+        .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@main"])
+        .withDirectory(".", source(ws))
+        .withDirectory(".", testData(ws))
+        # Nested Dagger clients find the workspace boundary by walking up to .git.
+        .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
+        .withWorkdir(path)
+        .withExec(["otelgotest", "./..."], experimentalPrivilegedNesting: true)
+    }
   }
 
 }

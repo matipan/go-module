@@ -19,46 +19,37 @@ type E2e {
   }
 
   """
-  Run the imported Go module against one selected fixture module.
+  Run testAll against one opted-in fixture module.
   """
   pub singleModuleCheck(ws: Workspace!): Void @check {
     go(
       version: "1.25",
-      selectModules: ["testdata/go-module-with-testdata"],
+      goModulesMustOptIn: true,
     ).testAll(ws)
+    go(version: "1.25", goModulesMustOptIn: true).module(ws, "testdata/go-module-excluded").test(ws)
   }
 
   """
   A directive in one module must not affect another module's source mount.
   """
   pub perModuleDirectiveCheck(ws: Workspace!): Void @check {
-    go(
-      version: "1.25",
-      selectModules: [
-        "fixtures/go-module-cross-include-a",
-        "fixtures/go-module-cross-include-b",
-      ],
-    ).testAll(ws)
+    let tool = go(version: "1.25")
+    tool.module(ws, "fixtures/go-module-cross-include-a").test(ws)
+    tool.module(ws, "fixtures/go-module-cross-include-b").test(ws)
   }
 
   """
   A nested module's directives must not affect its parent module's source mount.
   """
   pub nestedModuleDirectiveCheck(ws: Workspace!): Void @check {
-    go(
-      version: "1.25",
-      selectModules: ["fixtures/go-module-with-nested-module"],
-    ).testAll(ws)
+    go(version: "1.25").module(ws, "fixtures/go-module-with-nested-module").test(ws)
   }
 
   """
   A local replace target must be mounted with its non-Go assets.
   """
   pub goModReplaceCheck(ws: Workspace!): Void @check {
-    go(
-      version: "1.25",
-      selectModules: ["fixtures/go-module-with-replace"],
-    ).testAll(ws)
+    go(version: "1.25").module(ws, "fixtures/go-module-with-replace").test(ws)
   }
 
   """
@@ -78,10 +69,29 @@ type E2e {
       "module lookup unexpectedly snapped with findUp false: " + direct.path,
     )
 
-    let filtered = go(version: "1.25", selectModules: []).module(ws, "testdata/go-module-with-testdata/embedded-assets")
+    let optInTool = go(version: "1.25", goModulesMustOptIn: true)
+    let optedIn = optInTool.module(ws, "testdata/go-module-with-testdata")
     assert(
-      filtered.path == "testdata/go-module-with-testdata",
-      "direct module lookup was affected by discovery filters: " + filtered.path,
+      optedIn.mustOptIn == true,
+      "module did not inherit opt-in requirement",
+    )
+    assert(
+      optedIn.optedIn(ws),
+      "module did not detect opt-in marker",
+    )
+    assert(
+      optedIn.shouldIgnore(ws) == false,
+      "opted-in module was ignored",
+    )
+
+    let ignored = optInTool.module(ws, "fixtures/go-module-with-replace")
+    assert(
+      ignored.optedIn(ws) == false,
+      "module without marker reported opted in",
+    )
+    assert(
+      ignored.shouldIgnore(ws),
+      "module without marker was not ignored",
     )
 
     assert(
@@ -106,12 +116,13 @@ type E2e {
   }
 
   """
-  Run go generate in one selected fixture module and verify its changeset.
+  Run go generate in one opted-in fixture module and verify its changeset.
   """
   pub generateCheck(ws: Workspace!): Void @check {
     let changes = go(
       version: "1.25",
-      selectModules: [generatedFixturePath],
+      goModulesMustOptIn: true,
+      goModuleOptInFilename: ".dagger-go-generate",
     ).generate(ws)
 
     assert(
@@ -137,18 +148,44 @@ type E2e {
       "generated file did not contain expected contents",
     )
 
-    let emptyChanges = go(version: "1.25", selectModules: []).generate(ws)
+    let emptyChanges = go(
+      version: "1.25",
+      goModulesMustOptIn: true,
+      goModuleOptInFilename: ".missing-opt-in",
+    ).generate(ws)
     assert(
       emptyChanges.addedPaths.length == 0,
-      "empty module selection generated added paths",
+      "fully ignored generate produced added paths",
     )
     assert(
       emptyChanges.modifiedPaths.length == 0,
-      "empty module selection generated modified paths",
+      "fully ignored generate produced modified paths",
     )
     assert(
       emptyChanges.removedPaths.length == 0,
-      "empty module selection generated removed paths",
+      "fully ignored generate produced removed paths",
+    )
+
+    let ignoredModule = go(
+      version: "1.25",
+      goModulesMustOptIn: true,
+      goModuleOptInFilename: ".missing-opt-in",
+    ).module(ws, generatedFixturePath).generate(ws)
+    let originalModule = ws
+      .directory("/", include: [generatedFixturePath + "/**"])
+      .directory(generatedFixturePath)
+    let ignoredModuleChanges = ignoredModule.changes(originalModule)
+    assert(
+      ignoredModuleChanges.addedPaths.length == 0,
+      "ignored module generate produced added paths",
+    )
+    assert(
+      ignoredModuleChanges.modifiedPaths.length == 0,
+      "ignored module generate produced modified paths",
+    )
+    assert(
+      ignoredModuleChanges.removedPaths.length == 0,
+      "ignored module generate produced removed paths",
     )
 
     null
