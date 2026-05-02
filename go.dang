@@ -247,6 +247,19 @@ type GoModule {
   }
 
   """
+  Workspace include patterns for local Go packages imported by selected Go files.
+  """
+  pub includeFromGoImports(ws: Workspace!): [String!]! {
+    let sourceIncludes = includeBase + includeExtraFiles + includeFromGoDirectives(ws)
+    goIncludesHelper(directory)
+      .withEnvVariable("DAGGER_GO_HELPER_WORKSPACE_ID", toString(ws))
+      .withExec(["go", "run", ".", "imports", "--"] + sourceIncludes, experimentalPrivilegedNesting: true)
+      .stdout
+      .split("\n")
+      .filter { pattern => pattern != "" }
+  }
+
+  """
   Built-in workspace include patterns for this module's own Go source files.
   """
   pub includeBase: [String!]! {
@@ -268,7 +281,7 @@ type GoModule {
   Final workspace include patterns used to build this module's source directory.
   """
   pub include(ws: Workspace!): [String!]! {
-    includeBase + includeExtraFiles + includeFromGoDirectives(ws) + includeFromGoModReplace(ws)
+    includeBase + includeExtraFiles + includeFromGoDirectives(ws) + includeFromGoModReplace(ws) + includeFromGoImports(ws)
   }
 
   """

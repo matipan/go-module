@@ -30,6 +30,8 @@ func main() {
 		includes, err = runSource(os.Args[2:])
 	case "gomod":
 		includes, err = runGoMod(os.Args[2:])
+	case "imports":
+		includes, err = runImports(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -47,6 +49,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  go-includes source --add-prefix=DIR -- FILE.go")
 	fmt.Fprintln(os.Stderr, "  go-includes gomod  [--no-recursive] -- go.mod [go.mod...]")
+	fmt.Fprintln(os.Stderr, "  go-includes imports -- include-pattern [include-pattern...]")
 }
 
 func runSource(args []string) ([]string, error) {
@@ -73,6 +76,23 @@ func runGoMod(args []string) ([]string, error) {
 		os.Exit(2)
 	}
 	return goModIncludes(context.Background(), flags.Args(), !*noRecursive, workspaceGoModContents)
+}
+
+func runImports(args []string) ([]string, error) {
+	flags := newFlags("imports")
+	if err := flags.Parse(args); err != nil {
+		return nil, err
+	}
+	if flags.NArg() == 0 {
+		flags.Usage()
+		os.Exit(2)
+	}
+	ctx := context.Background()
+	goMods, goFiles, err := workspaceGoSeeds(ctx, flags.Args())
+	if err != nil {
+		return nil, err
+	}
+	return localImportIncludes(ctx, goMods, goFiles, workspaceFileContents, workspaceGlob)
 }
 
 func newFlags(name string) *flag.FlagSet {

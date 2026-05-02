@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -108,6 +111,105 @@ replace example.com/lib => ../lib
 	}
 }
 
+func TestLocalImportIncludes(t *testing.T) {
+	files := map[string]string{
+		"go.mod": `module example.com/root
+
+go 1.25
+`,
+		"cmd/codegen/main.go": `package main
+
+import "example.com/root/internal/helper"
+
+func main() {}
+`,
+		"internal/helper/helper.go": `package helper
+
+import "example.com/root/engine/slog"
+`,
+		"engine/slog/slog.go": `package slog
+`,
+		"sdk/go/go.mod": `module example.com/sdk
+
+go 1.25
+`,
+		"sdk/go/client.go": `package dagger
+
+import "example.com/sdk/querybuilder"
+`,
+		"sdk/go/querybuilder/querybuilder.go": `package querybuilder
+`,
+	}
+
+	got, err := localImportIncludes(
+		context.Background(),
+		[]string{"go.mod", "sdk/go/go.mod"},
+		[]string{"cmd/codegen/main.go", "sdk/go/client.go"},
+		staticFiles(files),
+		staticGlob(files),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"internal/helper/**",
+		"sdk/go/querybuilder/**",
+		"engine/slog/**",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("includes mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestLocalImportIncludesSkipsGoNamedDirectories(t *testing.T) {
+	files := map[string]string{
+		"go.mod": `module example.com/root
+
+go 1.25
+`,
+		"cmd/codegen/main.go": `package main
+
+import "example.com/root/internal/helper"
+`,
+		"internal/helper/helper.go": `package helper
+`,
+	}
+	baseReadFile := staticFiles(files)
+	readFile := func(ctx context.Context, filePath string) ([]byte, error) {
+		if filePath == "cmd/codegen/templates/src/_dagger.gen.go" {
+			return nil, errors.New("path cmd/codegen/templates/src/_dagger.gen.go is a directory, not a file")
+		}
+		return baseReadFile(ctx, filePath)
+	}
+
+	got, err := localImportIncludes(
+		context.Background(),
+		[]string{"go.mod"},
+		[]string{"cmd/codegen/main.go", "cmd/codegen/templates/src/_dagger.gen.go"},
+		readFile,
+		staticGlob(files),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"internal/helper/**"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("includes mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestLocalImportDirModuleRoot(t *testing.T) {
+	got, ok := localImportDir([]localGoModule{
+		{dir: "sdk/go", path: "example.com/sdk"},
+	}, "example.com/sdk")
+	if !ok {
+		t.Fatal("expected local import match")
+	}
+	if got != "sdk/go" {
+		t.Fatalf("local import dir mismatch: got %q, want %q", got, "sdk/go")
+	}
+}
+
 func TestAbsoluteIncludesIgnorePrefix(t *testing.T) {
 	got := addIncludePrefix("pkg", "/from-root.txt")
 	if got != "from-root.txt" {
@@ -116,12 +218,33 @@ func TestAbsoluteIncludesIgnorePrefix(t *testing.T) {
 }
 
 func staticGoMods(files map[string]string) goModReader {
+	return staticFiles(files)
+}
+
+func staticFiles(files map[string]string) goModReader {
 	return func(_ context.Context, path string) ([]byte, error) {
 		data, ok := files[path]
 		if !ok {
 			return nil, os.ErrNotExist
 		}
 		return []byte(data), nil
+	}
+}
+
+func staticGlob(files map[string]string) workspaceGlobber {
+	return func(_ context.Context, pattern string) ([]string, error) {
+		var matches []string
+		for filePath := range files {
+			match, err := path.Match(pattern, filePath)
+			if err != nil {
+				return nil, err
+			}
+			if match {
+				matches = append(matches, filePath)
+			}
+		}
+		sort.Strings(matches)
+		return matches, nil
 	}
 }
 

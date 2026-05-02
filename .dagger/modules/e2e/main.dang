@@ -160,6 +160,10 @@ type E2e {
       containsPath(includedGoMod.includeFromGoModReplace(ws), "fixtures/go-module-with-included-gomod-replace/engine/distconsts/../leaf/**"),
       "go.mod replace includes did not include recursively discovered replace target",
     )
+    assert(
+      containsPath(includedGoMod.includeFromGoImports(ws), "fixtures/go-module-with-included-gomod-replace/internal/helper/**"),
+      "go imports includes did not include local package imported by included generator",
+    )
     null
   }
 
