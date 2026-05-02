@@ -138,13 +138,13 @@ type GoModule {
   let optInFilename: String!
 
   """
-  Resolve a module-relative pattern to the workspace root.
+  Return a workspace-root path for a module-relative subpath.
   """
-  let includePath(pattern: String!): String! {
+  let subpath(relativePath: String!): String! {
     if (path == ".") {
-      pattern
+      relativePath
     } else {
-      path.trimSuffix("/") + "/" + pattern
+      path.trimSuffix("/") + "/" + relativePath
     }
   }
 
@@ -167,8 +167,8 @@ type GoModule {
   """
   pub optedIn(ws: Workspace!): Boolean! {
     ws
-      .directory("/", include: [includePath(optInFilename)])
-      .glob(includePath(optInFilename))
+      .directory("/", include: [subpath(optInFilename)])
+      .glob(subpath(optInFilename))
       .length > 0
   }
 
@@ -207,7 +207,7 @@ type GoModule {
     let goFiles = ws
       .directory(
         "/",
-        include: [includePath("**/*.go")],
+        include: [subpath("**/*.go")],
         exclude: nestedModuleExcludes,
       )
       .glob("**/*.go")
@@ -231,7 +231,7 @@ type GoModule {
   directives.
   """
   pub includeFromGoModReplace(ws: Workspace!): [String!]! {
-    let goModPath = includePath("go.mod")
+    let goModPath = subpath("go.mod")
     let goModSource = ws.directory("/", include: [goModPath])
     goIncludesHelper(goModSource)
       .withExec(["go", "run", ".", "gomod", "--add-prefix=" + path, "--", "/src/" + goModPath])
@@ -275,8 +275,8 @@ type GoModule {
     ws.directory(
       "/",
       include: [
-        includePath("testdata/**"),
-        includePath("**/testdata/**"),
+        subpath("testdata/**"),
+        subpath("**/testdata/**"),
       ],
     )
   }
@@ -309,7 +309,7 @@ type GoModule {
   pub generate(ws: Workspace!): Directory! {
     if (shouldIgnore(ws)) {
       ws
-        .directory("/", include: [includePath("**")])
+        .directory("/", include: [subpath("**")])
         .directory(path)
     } else {
       generateExec(ws).directory(".")
@@ -332,7 +332,7 @@ type GoModule {
   let testExec(ws: Workspace!): Container! {
     if (shouldIgnore(ws)) {
       base
-        .withDirectory(".", ws.directory("/", include: [includePath("go.mod")]))
+        .withDirectory(".", ws.directory("/", include: [subpath("go.mod")]))
         .withWorkdir(path)
     } else {
       base
