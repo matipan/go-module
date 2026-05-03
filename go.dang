@@ -328,17 +328,17 @@ type GoModule {
   }
 
   """
-  Module directory after running go generate.
-  When opt-in is required and this module has no marker, the source is returned unchanged.
+  Changes made by running go generate in this module.
+  When opt-in is required and this module has no marker, the changeset is empty.
   """
-  pub generate(ws: Workspace!): Directory! {
-    if (shouldIgnore(ws)) {
-      ws
-        .directory("/", include: [subpath("**")])
-        .directory(path)
+  pub generate(ws: Workspace!): Changeset! {
+    let before = directory.withDirectory(path, source(ws).directory(path))
+    let after = if (shouldIgnore(ws)) {
+      before
     } else {
-      generateExec(ws).directory(".")
+      before.withDirectory(path, generateExec(ws).directory("."))
     }
+    after.changes(before)
   }
 
   """
