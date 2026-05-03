@@ -13,6 +13,10 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	telemetry "github.com/dagger/otel-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func main() {
@@ -21,17 +25,25 @@ func main() {
 		os.Exit(2)
 	}
 
+	ctx := context.Background()
+	cfg := telemetry.Config{}
+	if exporter, ok := telemetry.ConfiguredSpanExporter(ctx); ok {
+		cfg.LiveTraceExporters = append(cfg.LiveTraceExporters, exporter)
+	}
+	ctx = telemetry.Init(ctx, cfg)
+	defer telemetry.Close()
+
 	var (
 		includes []string
 		err      error
 	)
 	switch os.Args[1] {
 	case "source":
-		includes, err = runSource(os.Args[2:])
+		includes, err = runSource(ctx, os.Args[2:])
 	case "gomod":
-		includes, err = runGoMod(os.Args[2:])
+		includes, err = runGoMod(ctx, os.Args[2:])
 	case "imports":
-		includes, err = runImports(os.Args[2:])
+		includes, err = runImports(ctx, os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -52,7 +64,10 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  go-includes imports -- include-pattern [include-pattern...]")
 }
 
-func runSource(args []string) ([]string, error) {
+func runSource(ctx context.Context, args []string) (includes []string, rerr error) {
+	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes source")
+	defer telemetry.EndWithCause(span, &rerr)
+
 	flags := newFlags("source")
 	prefix := flags.String("add-prefix", "", "prefix to add to relative include patterns")
 	if err := flags.Parse(args); err != nil {
@@ -62,10 +77,16 @@ func runSource(args []string) ([]string, error) {
 		flags.Usage()
 		os.Exit(2)
 	}
-	return sourceIncludes(flags.Arg(0), *prefix)
+	span.SetAttributes(attribute.String("go_includes.file", flags.Arg(0)))
+	includes, rerr = sourceIncludes(flags.Arg(0), *prefix)
+	span.SetAttributes(attribute.Int("go_includes.include_count", len(includes)))
+	return includes, rerr
 }
 
-func runGoMod(args []string) ([]string, error) {
+func runGoMod(ctx context.Context, args []string) (includes []string, rerr error) {
+	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes gomod")
+	defer telemetry.EndWithCause(span, &rerr)
+
 	flags := newFlags("gomod")
 	noRecursive := flags.Bool("no-recursive", false, "only scan go.mod files passed on the command line")
 	if err := flags.Parse(args); err != nil {
@@ -75,10 +96,19 @@ func runGoMod(args []string) ([]string, error) {
 		flags.Usage()
 		os.Exit(2)
 	}
-	return goModIncludes(context.Background(), flags.Args(), !*noRecursive, workspaceGoModContents)
+	span.SetAttributes(
+		attribute.Int("go_includes.seed_go_mod_count", flags.NArg()),
+		attribute.Bool("go_includes.recursive", !*noRecursive),
+	)
+	includes, rerr = goModIncludes(ctx, flags.Args(), !*noRecursive, sourceFileContents)
+	span.SetAttributes(attribute.Int("go_includes.include_count", len(includes)))
+	return includes, rerr
 }
 
-func runImports(args []string) ([]string, error) {
+func runImports(ctx context.Context, args []string) (includes []string, rerr error) {
+	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes imports")
+	defer telemetry.EndWithCause(span, &rerr)
+
 	flags := newFlags("imports")
 	if err := flags.Parse(args); err != nil {
 		return nil, err
@@ -87,12 +117,18 @@ func runImports(args []string) ([]string, error) {
 		flags.Usage()
 		os.Exit(2)
 	}
-	ctx := context.Background()
 	goMods, goFiles, err := workspaceGoSeeds(ctx, flags.Args())
 	if err != nil {
 		return nil, err
 	}
-	return localImportIncludes(ctx, goMods, goFiles, workspaceFileContents, workspaceGlob)
+	span.SetAttributes(
+		attribute.Int("go_includes.seed_include_count", flags.NArg()),
+		attribute.Int("go_includes.seed_go_mod_count", len(goMods)),
+		attribute.Int("go_includes.seed_go_file_count", len(goFiles)),
+	)
+	includes, rerr = localImportIncludes(ctx, goMods, goFiles, sourceFileContents, sourceGlob)
+	span.SetAttributes(attribute.Int("go_includes.include_count", len(includes)))
+	return includes, rerr
 }
 
 func newFlags(name string) *flag.FlagSet {

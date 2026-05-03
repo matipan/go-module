@@ -237,9 +237,8 @@ type GoModule {
     if (goModPaths.length == 0) {
       [] :: [String!]!
     } else {
-      goIncludesHelper(directory)
-        .withEnvVariable("DAGGER_GO_HELPER_WORKSPACE_ID", toString(ws))
-        .withExec(["go", "run", ".", "gomod", "--"] + goModPaths, experimentalPrivilegedNesting: true)
+      goIncludesHelper(ws.directory("/", include: ["**/go.mod"]))
+        .withExec(["go", "run", ".", "gomod", "--"] + goModPaths)
         .stdout
         .split("\n")
         .filter { pattern => pattern != "" }
@@ -251,7 +250,7 @@ type GoModule {
   """
   pub includeFromGoImports(ws: Workspace!): [String!]! {
     let sourceIncludes = includeBase + includeExtraFiles + includeFromGoDirectives(ws)
-    goIncludesHelper(directory)
+    goIncludesHelper(ws.directory("/", include: ["**/*.go", "**/go.mod"]))
       .withEnvVariable("DAGGER_GO_HELPER_WORKSPACE_ID", toString(ws))
       .withExec(["go", "run", ".", "imports", "--"] + sourceIncludes, experimentalPrivilegedNesting: true)
       .stdout

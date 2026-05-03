@@ -42,7 +42,7 @@ func localImportIncludes(ctx context.Context, seedGoMods, seedGoFiles []string, 
 		data, err := readFile(ctx, filePath)
 		if err != nil {
 			// Dagger glob can match directories whose names end in .go; Go ignores them.
-			if strings.Contains(err.Error(), "is a directory, not a file") {
+			if strings.Contains(err.Error(), "is a directory") {
 				continue
 			}
 			return nil, fmt.Errorf("read %s: %w", filePath, err)
