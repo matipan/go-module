@@ -205,14 +205,13 @@ type GoModule {
   }
 
   """
-  Additional workspace include patterns discovered from this module's Go
-  directives and local go.mod replace graph.
+  Additional workspace include patterns discovered by scanning Go directives
+  and local go.mod replaces reachable from this module's include layers.
   """
   pub includeDiscovered(ws: Workspace!): [String!]! {
     goIncludesHelper(ws)
       .withExec(
         ["go", "run", ".", "module", "--path", path],
-        stdin: (includeBase + includeExtraFiles).join("\n"),
         experimentalPrivilegedNesting: true,
       )
       .stdout

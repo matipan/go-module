@@ -82,28 +82,6 @@ func TestIncludePrefixForGoFile(t *testing.T) {
 	}
 }
 
-func TestInputLinesUsesArgs(t *testing.T) {
-	got, err := inputLines([]string{"a.go", "b.go"}, strings.NewReader("ignored.go\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"a.go", "b.go"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("paths mismatch:\n got: %#v\nwant: %#v", got, want)
-	}
-}
-
-func TestInputLinesReadsStdin(t *testing.T) {
-	got, err := inputLines(nil, strings.NewReader("a.go\n\nb.go\r\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"a.go", "b.go"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("paths mismatch:\n got: %#v\nwant: %#v", got, want)
-	}
-}
-
 func TestGoModIncludes(t *testing.T) {
 	got, err := goModIncludes(context.Background(), []string{"app/go.mod"}, false, staticGoMods(map[string]string{
 		"app/go.mod": `module example.com/app
@@ -208,11 +186,7 @@ go 1.25
 	got, err := moduleDiscovery{
 		workspace:  ws,
 		modulePath: "app",
-		seedIncludes: []string{
-			"app/**/*.go",
-			"app/**/go.mod",
-		},
-		recursive: true,
+		recursive:  true,
 	}.includes(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -233,6 +207,34 @@ go 1.25
 		"app/./lib/**",
 		"app/lib/./leaf/**",
 	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("includes mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestModuleIncludesSkipsGoLikeDirectories(t *testing.T) {
+	ws := goDirectoryWorkspace{
+		staticWorkspace: staticWorkspace{
+			"app/go.mod": `module example.com/app
+
+go 1.25
+`,
+			"app/main.go": `package app
+
+// workspace:include data.txt
+`,
+		},
+		dir: "app/templates/src/_dagger.gen.go",
+	}
+	got, err := moduleDiscovery{
+		workspace:  ws,
+		modulePath: "app",
+		recursive:  true,
+	}.includes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"app/data.txt"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("includes mismatch:\n got: %#v\nwant: %#v", got, want)
 	}
@@ -260,6 +262,30 @@ func staticFiles(files map[string]string) goModReader {
 }
 
 type staticWorkspace map[string]string
+
+type goDirectoryWorkspace struct {
+	staticWorkspace
+	dir string
+}
+
+func (w goDirectoryWorkspace) glob(ctx context.Context, include, exclude []string, pattern string) ([]string, error) {
+	matches, err := w.staticWorkspace.glob(ctx, include, exclude, pattern)
+	if err != nil {
+		return nil, err
+	}
+	if matchAny(include, w.dir) && !matchAny(exclude, w.dir) && matchTestPattern(pattern, w.dir) {
+		matches = append(matches, w.dir)
+	}
+	sort.Strings(matches)
+	return matches, nil
+}
+
+func (w goDirectoryWorkspace) readFile(ctx context.Context, filePath string) ([]byte, error) {
+	if path.Clean(filePath) == w.dir {
+		return nil, errNotRegularFile
+	}
+	return w.staticWorkspace.readFile(ctx, filePath)
+}
 
 func (w staticWorkspace) readFile(_ context.Context, filePath string) ([]byte, error) {
 	data, ok := w[path.Clean(filePath)]

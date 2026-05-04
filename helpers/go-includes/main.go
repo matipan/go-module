@@ -3,13 +3,11 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"go/parser"
 	"go/token"
-	"io"
 	"os"
 	"path"
 	"strconv"
@@ -44,10 +42,6 @@ func main() {
 	switch os.Args[1] {
 	case "module":
 		includes, err = runModule(ctx, os.Args[2:])
-	case "from-go-directives":
-		includes, err = runFromGoDirectives(ctx, os.Args[2:])
-	case "from-go-mod-replace":
-		includes, err = runFromGoModReplace(ctx, os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -64,10 +58,6 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  go-includes module --path=DIR [--no-recursive]")
-	fmt.Fprintln(os.Stderr, "  go-includes from-go-directives [--add-prefix=DIR] [-- FILE.go [FILE.go...]]")
-	fmt.Fprintln(os.Stderr, "  go-includes from-go-mod-replace [--no-recursive] [-- go.mod [go.mod...]]")
-	fmt.Fprintln(os.Stderr, "  The module command reads seed include patterns from stdin, one per line.")
-	fmt.Fprintln(os.Stderr, "  The other commands read paths from stdin when no paths are passed.")
 }
 
 func runModule(ctx context.Context, args []string) (includes []string, rerr error) {
@@ -83,78 +73,24 @@ func runModule(ctx context.Context, args []string) (includes []string, rerr erro
 	if *modulePath == "" {
 		return nil, fmt.Errorf("--path is required")
 	}
-	seedIncludes, err := inputLines(flags.Args(), os.Stdin)
-	if err != nil {
-		return nil, err
+	if flags.NArg() != 0 {
+		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	ws, err := currentWorkspace(ctx)
 	if err != nil {
 		return nil, err
 	}
 	discovery := moduleDiscovery{
-		workspace:    daggerWorkspace{ws: ws},
-		modulePath:   cleanWorkspacePath(*modulePath),
-		seedIncludes: seedIncludes,
-		recursive:    !*noRecursive,
+		workspace:  daggerWorkspace{ws: ws},
+		modulePath: cleanWorkspacePath(*modulePath),
+		recursive:  !*noRecursive,
 	}
 	includes, rerr = discovery.includes(ctx)
 	span.SetAttributes(
 		attribute.String("go_includes.module_path", discovery.modulePath),
-		attribute.Int("go_includes.seed_include_count", len(seedIncludes)),
 		attribute.Bool("go_includes.recursive", discovery.recursive),
 		attribute.Int("go_includes.include_count", len(includes)),
 	)
-	return includes, rerr
-}
-
-func runFromGoDirectives(ctx context.Context, args []string) (includes []string, rerr error) {
-	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes from-go-directives")
-	defer telemetry.EndWithCause(span, &rerr)
-
-	flags := newFlags("from-go-directives")
-	prefix := flags.String("add-prefix", "", "prefix to add to relative include patterns")
-	if err := flags.Parse(args); err != nil {
-		return nil, err
-	}
-	paths, err := inputLines(flags.Args(), os.Stdin)
-	if err != nil {
-		return nil, err
-	}
-	span.SetAttributes(attribute.Int("go_includes.file_count", len(paths)))
-	for _, filePath := range paths {
-		includePrefix := *prefix
-		if includePrefix == "" {
-			includePrefix = includePrefixForGoFile(filePath)
-		}
-		fileIncludes, err := goDirectiveIncludes(filePath, includePrefix)
-		if err != nil {
-			return nil, err
-		}
-		includes = append(includes, fileIncludes...)
-	}
-	span.SetAttributes(attribute.Int("go_includes.include_count", len(includes)))
-	return includes, rerr
-}
-
-func runFromGoModReplace(ctx context.Context, args []string) (includes []string, rerr error) {
-	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes from-go-mod-replace")
-	defer telemetry.EndWithCause(span, &rerr)
-
-	flags := newFlags("from-go-mod-replace")
-	noRecursive := flags.Bool("no-recursive", false, "only scan go.mod files passed on the command line")
-	if err := flags.Parse(args); err != nil {
-		return nil, err
-	}
-	paths, err := inputLines(flags.Args(), os.Stdin)
-	if err != nil {
-		return nil, err
-	}
-	span.SetAttributes(
-		attribute.Int("go_includes.seed_go_mod_count", len(paths)),
-		attribute.Bool("go_includes.recursive", !*noRecursive),
-	)
-	includes, rerr = goModIncludes(ctx, paths, !*noRecursive, sourceFileContents)
-	span.SetAttributes(attribute.Int("go_includes.include_count", len(includes)))
 	return includes, rerr
 }
 
@@ -165,22 +101,6 @@ func newFlags(name string) *flag.FlagSet {
 		flags.PrintDefaults()
 	}
 	return flags
-}
-
-func inputLines(args []string, stdin io.Reader) ([]string, error) {
-	if len(args) > 0 {
-		return args, nil
-	}
-
-	var paths []string
-	scanner := bufio.NewScanner(stdin)
-	for scanner.Scan() {
-		line := strings.TrimSuffix(scanner.Text(), "\r")
-		if line != "" {
-			paths = append(paths, line)
-		}
-	}
-	return paths, scanner.Err()
 }
 
 func goDirectiveIncludes(filePath, prefix string) ([]string, error) {

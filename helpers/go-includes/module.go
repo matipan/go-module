@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 
@@ -15,16 +16,17 @@ type workspaceFiles interface {
 	readFile(ctx context.Context, filePath string) ([]byte, error)
 }
 
+var errNotRegularFile = errors.New("not a regular file")
+
 type moduleDiscovery struct {
-	workspace    workspaceFiles
-	modulePath   string
-	seedIncludes []string
-	recursive    bool
+	workspace  workspaceFiles
+	modulePath string
+	recursive  bool
 }
 
 func (d moduleDiscovery) includes(ctx context.Context) (_ []string, rerr error) {
 	all := newIncludeSet()
-	all.add(d.seedIncludes...)
+	all.add(d.includeBase()...)
 
 	discovered := newIncludeSet()
 	if err := d.addDirectiveIncludes(ctx, all, discovered); err != nil {
@@ -34,6 +36,25 @@ func (d moduleDiscovery) includes(ctx context.Context) (_ []string, rerr error) 
 		return nil, err
 	}
 	return discovered.values(), nil
+}
+
+func (d moduleDiscovery) includeBase() []string {
+	patterns := []string{
+		"**/*.go",
+		"**/*.c",
+		"**/*.h",
+		"**/*.s",
+		"**/*.S",
+		"**/*.syso",
+		"**/go.mod",
+		"**/go.sum",
+		"**/go.work",
+		"**/go.work.sum",
+	}
+	for i, pattern := range patterns {
+		patterns[i] = addIncludePrefix(d.modulePath, pattern)
+	}
+	return patterns
 }
 
 func (d moduleDiscovery) addDirectiveIncludes(ctx context.Context, all, discovered *includeSet) (rerr error) {
@@ -47,6 +68,9 @@ func (d moduleDiscovery) addDirectiveIncludes(ctx context.Context, all, discover
 	startCount := discovered.len()
 	for _, filePath := range goFiles {
 		data, err := d.workspace.readFile(ctx, filePath)
+		if errors.Is(err, errNotRegularFile) {
+			continue
+		}
 		if err != nil {
 			return err
 		}

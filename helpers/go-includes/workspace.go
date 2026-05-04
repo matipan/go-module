@@ -58,11 +58,13 @@ func (w daggerWorkspace) readFile(ctx context.Context, filePath string) ([]byte,
 	if escapesWorkspace(cleanPath) {
 		return nil, fmt.Errorf("path escapes workspace: %s", filePath)
 	}
-	contents, err := w.ws.
-		Directory("/", dagger.WorkspaceDirectoryOpts{Include: []string{cleanPath}}).
-		File(cleanPath).
-		Contents(ctx)
+	dir := w.ws.Directory("/", dagger.WorkspaceDirectoryOpts{Include: []string{cleanPath}})
+	contents, err := dir.File(cleanPath).Contents(ctx)
 	if err != nil {
+		fileType, statErr := dir.Stat(cleanPath).FileType(ctx)
+		if statErr == nil && fileType == dagger.FileTypeDirectory {
+			return nil, errNotRegularFile
+		}
 		return nil, err
 	}
 	return []byte(contents), nil
