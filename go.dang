@@ -102,14 +102,22 @@ type Go {
   Modules with the generate skip marker, or without go:generate directives,
   are skipped.
   """
-  pub generate(ws: Workspace!): Changeset! @generate {
+  pub generateAll(ws: Workspace!): Changeset! @generate {
+    # Find generator modules once up front, before paying for per-module source
+    # discovery and container setup.
     let generatePaths = generateModulePaths(ws)
     let mods = modules(ws).filter { mod =>
       mod.skipGenerate(ws) == false and generatePaths.filter { path => path == mod.path }.length > 0
     }
+
+    # Snapshot each selected module before generation, using the same source
+    # boundary that its generate container will receive.
     let before = mods.reduce(directory) { before, mod =>
       before.withDirectory(mod.path, mod.source(ws).directory(mod.path))
     }
+
+    # Merge each generated module tree back into that snapshot, then diff once
+    # so callers get one changeset for the whole workspace.
     let after = mods.reduce(before) { after, mod =>
       after.withDirectory(mod.path, mod.generateExec(ws).directory("."))
     }
