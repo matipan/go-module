@@ -1,5 +1,5 @@
-// go.dang runs this helper inside the mounted source tree.
-// It emits workspace include patterns, one per line.
+// go.dang runs this helper to discover workspace include patterns.
+// It emits one include pattern per line.
 package main
 
 import (
@@ -35,12 +35,15 @@ func main() {
 	}
 	ctx = telemetry.Init(ctx, cfg)
 	defer telemetry.Close()
+	defer func() { _ = closeDaggerClient() }()
 
 	var (
 		includes []string
 		err      error
 	)
 	switch os.Args[1] {
+	case "module":
+		includes, err = runModule(ctx, os.Args[2:])
 	case "from-go-directives":
 		includes, err = runFromGoDirectives(ctx, os.Args[2:])
 	case "from-go-mod-replace":
@@ -60,9 +63,48 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  go-includes module --path=DIR [--no-recursive]")
 	fmt.Fprintln(os.Stderr, "  go-includes from-go-directives [--add-prefix=DIR] [-- FILE.go [FILE.go...]]")
 	fmt.Fprintln(os.Stderr, "  go-includes from-go-mod-replace [--no-recursive] [-- go.mod [go.mod...]]")
-	fmt.Fprintln(os.Stderr, "  When no paths are passed, paths are read from stdin, one per line.")
+	fmt.Fprintln(os.Stderr, "  The module command reads seed include patterns from stdin, one per line.")
+	fmt.Fprintln(os.Stderr, "  The other commands read paths from stdin when no paths are passed.")
+}
+
+func runModule(ctx context.Context, args []string) (includes []string, rerr error) {
+	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes module")
+	defer telemetry.EndWithCause(span, &rerr)
+
+	flags := newFlags("module")
+	modulePath := flags.String("path", "", "workspace-relative Go module root")
+	noRecursive := flags.Bool("no-recursive", false, "only scan go.mod files discovered before local replace includes")
+	if err := flags.Parse(args); err != nil {
+		return nil, err
+	}
+	if *modulePath == "" {
+		return nil, fmt.Errorf("--path is required")
+	}
+	seedIncludes, err := inputLines(flags.Args(), os.Stdin)
+	if err != nil {
+		return nil, err
+	}
+	ws, err := currentWorkspace(ctx)
+	if err != nil {
+		return nil, err
+	}
+	discovery := moduleDiscovery{
+		workspace:    daggerWorkspace{ws: ws},
+		modulePath:   cleanWorkspacePath(*modulePath),
+		seedIncludes: seedIncludes,
+		recursive:    !*noRecursive,
+	}
+	includes, rerr = discovery.includes(ctx)
+	span.SetAttributes(
+		attribute.String("go_includes.module_path", discovery.modulePath),
+		attribute.Int("go_includes.seed_include_count", len(seedIncludes)),
+		attribute.Bool("go_includes.recursive", discovery.recursive),
+		attribute.Int("go_includes.include_count", len(includes)),
+	)
+	return includes, rerr
 }
 
 func runFromGoDirectives(ctx context.Context, args []string) (includes []string, rerr error) {
@@ -74,7 +116,7 @@ func runFromGoDirectives(ctx context.Context, args []string) (includes []string,
 	if err := flags.Parse(args); err != nil {
 		return nil, err
 	}
-	paths, err := inputPaths(flags.Args(), os.Stdin)
+	paths, err := inputLines(flags.Args(), os.Stdin)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +145,7 @@ func runFromGoModReplace(ctx context.Context, args []string) (includes []string,
 	if err := flags.Parse(args); err != nil {
 		return nil, err
 	}
-	paths, err := inputPaths(flags.Args(), os.Stdin)
+	paths, err := inputLines(flags.Args(), os.Stdin)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +167,7 @@ func newFlags(name string) *flag.FlagSet {
 	return flags
 }
 
-func inputPaths(args []string, stdin io.Reader) ([]string, error) {
+func inputLines(args []string, stdin io.Reader) ([]string, error) {
 	if len(args) > 0 {
 		return args, nil
 	}
@@ -149,9 +191,16 @@ func goDirectiveIncludes(filePath, prefix string) ([]string, error) {
 	if info.IsDir() {
 		return nil, nil
 	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return goDirectiveIncludesFromBytes(filePath, prefix, data)
+}
 
+func goDirectiveIncludesFromBytes(filePath, prefix string, data []byte) ([]string, error) {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filePath, nil, parser.ParseComments)
+	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments)
 	if err != nil {
 		return nil, err
 	}

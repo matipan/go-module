@@ -110,12 +110,13 @@ type E2e {
       "module without marker reported skipped generate",
     )
 
+    let discovered = mod.includeDiscovered(ws)
     assert(
-      containsPath(mod.includeFromGoDirectives(ws), "LICENSE"),
+      containsPath(discovered, "LICENSE"),
       "source includes did not include workspace-root directive include",
     )
     assert(
-      containsPath(mod.includeFromGoDirectives(ws), "testdata/go-module-with-testdata/embedded-assets/message.txt"),
+      containsPath(discovered, "testdata/go-module-with-testdata/embedded-assets/message.txt"),
       "source includes did not include go:embed file",
     )
     assert(
@@ -141,23 +142,25 @@ type E2e {
     )
 
     let replaced = go(version: "1.25").module(ws, "fixtures/go-module-with-replace")
+    let replacedIncludes = replaced.includeDiscovered(ws)
     assert(
-      containsPath(replaced.includeFromGoModReplace(ws), "fixtures/go-module-with-replace/../replaced-lib/**"),
+      containsPath(replacedIncludes, "fixtures/go-module-with-replace/../replaced-lib/**"),
       "go.mod replace includes did not include replaced lib",
     )
 
     let includedGoMod = go(version: "1.25").module(ws, "fixtures/go-module-with-included-gomod-replace/sdk/go")
+    let includedGoModIncludes = includedGoMod.includeDiscovered(ws)
     assert(
-      containsPath(includedGoMod.includeFromGoModReplace(ws), "fixtures/go-module-with-included-gomod-replace/./engine/distconsts/**"),
+      containsPath(includedGoModIncludes, "fixtures/go-module-with-included-gomod-replace/./engine/distconsts/**"),
       "go.mod replace includes did not include replace target from included parent go.mod",
     )
     assert(
-      containsPath(includedGoMod.includeFromGoModReplace(ws), "fixtures/go-module-with-included-gomod-replace/engine/distconsts/../leaf/**"),
+      containsPath(includedGoModIncludes, "fixtures/go-module-with-included-gomod-replace/engine/distconsts/../leaf/**"),
       "go.mod replace includes did not include recursively discovered replace target",
     )
     assert(
       containsPath(
-        includedGoMod.includeFromGoDirectives(ws),
+        includedGoModIncludes,
         "fixtures/go-module-with-included-gomod-replace/sdk/go/../../**/*.go",
       ),
       "go:generate -C did not include generator module Go files",

@@ -162,14 +162,14 @@ type GoModule {
   """
   Base container for the Go include helper.
   """
-  let goIncludesHelper(source: Directory!): Container! {
+  let goIncludesHelper(ws: Workspace!): Container! {
     container
       .from("golang:" + version + "-alpine")
       .withoutEntrypoint
       .withWorkdir("/helpers/go-includes")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-      .withDirectory("/src", source)
+      .withEnvVariable("DAGGER_GO_WORKSPACE_ID", toJSON(ws.id))
       .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
   }
 
@@ -205,71 +205,19 @@ type GoModule {
   }
 
   """
-  Workspace include patterns discovered from go:embed, go:generate, and
-  workspace:include directives in this module's Go files.
+  Additional workspace include patterns discovered from this module's Go
+  directives and local go.mod replace graph.
   """
-  pub includeFromGoDirectives(ws: Workspace!): [String!]! {
-    let nestedModuleExcludes = ws
-      .directory("/", include: ["**/go.mod"])
-      .glob("**/go.mod")
-      .map { modPath =>
-        if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") }
-      }
-      .filter { nestedPath =>
-        if (path == ".") {
-          nestedPath != "."
-        } else {
-          nestedPath.hasPrefix(path.trimSuffix("/") + "/")
-        }
-      }
-      .map { nestedPath =>
-        if (nestedPath == ".") {
-          "**"
-        } else {
-          nestedPath.trimSuffix("/") + "/**"
-        }
-      }
-    let goFiles = ws
-      .directory(
-        "/",
-        include: [subpath("**/*.go")],
-        exclude: nestedModuleExcludes,
+  pub includeDiscovered(ws: Workspace!): [String!]! {
+    goIncludesHelper(ws)
+      .withExec(
+        ["go", "run", ".", "module", "--path", path],
+        stdin: (includeBase + includeExtraFiles).join("\n"),
+        experimentalPrivilegedNesting: true,
       )
-      .glob("**/*.go")
-    if (goFiles.length == 0) {
-      [] :: [String!]!
-    } else {
-      goIncludesHelper(ws.directory("/", include: goFiles))
-        .withExec(
-          ["go", "run", ".", "from-go-directives"],
-          stdin: goFiles.map { filePath => "/src/" + filePath }.join("\n"),
-        )
-        .stdout
-        .split("\n")
-        .filter { pattern => pattern != "" }
-    }
-  }
-
-  """
-  Workspace include patterns for local replace targets found in go.mod files
-  selected by includeBase, includeExtraFiles, and includeFromGoDirectives.
-  """
-  pub includeFromGoModReplace(ws: Workspace!): [String!]! {
-    let goModPaths = ws
-      .directory("/", include: includeBase + includeExtraFiles + includeFromGoDirectives(ws))
-      .glob("**/go.mod")
-    if (goModPaths.length == 0) {
-      [] :: [String!]!
-    } else {
-      goIncludesHelper(ws.directory("/", include: ["**/go.mod"]))
-        .withExec(
-          ["go", "run", ".", "from-go-mod-replace"],
-          stdin: goModPaths.join("\n"),
-        )
-        .stdout
-        .split("\n")
-        .filter { pattern => pattern != "" }
-    }
+      .stdout
+      .split("\n")
+      .filter { pattern => pattern != "" }
   }
 
   """
@@ -294,7 +242,7 @@ type GoModule {
   Final workspace include patterns used to build this module's source directory.
   """
   pub include(ws: Workspace!): [String!]! {
-    includeBase + includeExtraFiles + includeFromGoDirectives(ws) + includeFromGoModReplace(ws)
+    includeBase + includeExtraFiles + includeDiscovered(ws)
   }
 
   """

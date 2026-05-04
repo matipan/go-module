@@ -1,0 +1,69 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+
+	"dagger.io/dagger"
+)
+
+const workspaceIDEnv = "DAGGER_GO_WORKSPACE_ID"
+
+var daggerClient *dagger.Client
+
+func currentWorkspace(ctx context.Context) (*dagger.Workspace, error) {
+	rawID := os.Getenv(workspaceIDEnv)
+	if rawID == "" {
+		return nil, fmt.Errorf("%s is not set", workspaceIDEnv)
+	}
+	workspaceID := rawID
+	if err := json.Unmarshal([]byte(rawID), &workspaceID); err != nil {
+		workspaceID = rawID
+	}
+
+	var err error
+	if daggerClient == nil {
+		daggerClient, err = dagger.Connect(ctx, dagger.WithLogOutput(os.Stderr))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return daggerClient.LoadWorkspaceFromID(dagger.WorkspaceID(workspaceID)), nil
+}
+
+func closeDaggerClient() error {
+	if daggerClient == nil {
+		return nil
+	}
+	err := daggerClient.Close()
+	daggerClient = nil
+	return err
+}
+
+type daggerWorkspace struct {
+	ws *dagger.Workspace
+}
+
+func (w daggerWorkspace) glob(ctx context.Context, include, exclude []string, pattern string) ([]string, error) {
+	return w.ws.Directory("/", dagger.WorkspaceDirectoryOpts{
+		Include: include,
+		Exclude: exclude,
+	}).Glob(ctx, pattern)
+}
+
+func (w daggerWorkspace) readFile(ctx context.Context, filePath string) ([]byte, error) {
+	cleanPath := cleanWorkspacePath(filePath)
+	if escapesWorkspace(cleanPath) {
+		return nil, fmt.Errorf("path escapes workspace: %s", filePath)
+	}
+	contents, err := w.ws.
+		Directory("/", dagger.WorkspaceDirectoryOpts{Include: []string{cleanPath}}).
+		File(cleanPath).
+		Contents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(contents), nil
+}
