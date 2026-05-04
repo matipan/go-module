@@ -123,6 +123,16 @@ type E2e {
       mod.skipGenerate(ws) == false,
       "module without marker reported skipped generate",
     )
+    assert(
+      mod.hasGenerateDirectives(ws) == false,
+      "module without go:generate directive reported generate directives",
+    )
+    assert(
+      go(version: "1.25")
+        .module(ws, generatedFixturePath)
+        .hasGenerateDirectives(ws),
+      "module with go:generate directive did not report generate directives",
+    )
 
     let discovered = mod.includeDiscovered(ws)
     assert(

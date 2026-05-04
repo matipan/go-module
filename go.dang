@@ -99,10 +99,14 @@ type Go {
 
   """
   Run go generate in every discovered Go module.
-  Modules with the generate skip marker are skipped.
+  Modules with the generate skip marker, or without go:generate directives,
+  are skipped.
   """
   pub generate(ws: Workspace!): Changeset! @generate {
-    let mods = modules(ws).filter { mod => mod.skipGenerate(ws) == false }
+    let generatePaths = generateModulePaths(ws)
+    let mods = modules(ws).filter { mod =>
+      mod.skipGenerate(ws) == false and generatePaths.filter { path => path == mod.path }.length > 0
+    }
     let before = mods.reduce(directory) { before, mod =>
       before.withDirectory(mod.path, mod.source(ws).directory(mod.path))
     }
@@ -110,6 +114,34 @@ type Go {
       after.withDirectory(mod.path, mod.generateExec(ws).directory("."))
     }
     after.changes(before)
+  }
+
+  """
+  Go module paths that contain go:generate directives.
+  """
+  let generateModulePaths(ws: Workspace!): [String!]! {
+    goIncludesHelper(ws)
+      .withExec(
+        ["go", "run", ".", "generate-modules"],
+        experimentalPrivilegedNesting: true,
+      )
+      .stdout
+      .split("\n")
+      .filter { path => path != "" }
+  }
+
+  """
+  Base container for the Go include helper.
+  """
+  let goIncludesHelper(ws: Workspace!): Container! {
+    container
+      .from("golang:" + version + "-alpine")
+      .withoutEntrypoint
+      .withWorkdir("/helpers/go-includes")
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withEnvVariable("DAGGER_GO_WORKSPACE_ID", toJSON(ws.id))
+      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
   }
 
 }
@@ -192,6 +224,28 @@ type GoModule {
   """
   pub skipGenerate(ws: Workspace!): Boolean! {
     hasMarker(ws, skipGenerateFilename)
+  }
+
+  """
+  Whether this module's Go files contain a go:generate directive.
+  """
+  pub hasGenerateDirectives(ws: Workspace!): Boolean! {
+    goIncludesHelper(ws)
+      .withExec(
+        ["go", "run", ".", "generate-modules", "--path", path],
+        experimentalPrivilegedNesting: true,
+      )
+      .stdout
+      .split("\n")
+      .filter { path => path != "" }
+      .length > 0
+  }
+
+  """
+  Whether go generate should run for this module.
+  """
+  let shouldGenerate(ws: Workspace!): Boolean! {
+    skipGenerate(ws) == false and hasGenerateDirectives(ws)
   }
 
   """
@@ -291,10 +345,11 @@ type GoModule {
 
   """
   Changes made by running go generate in this module.
-  If the generate skip marker is present, the changeset is empty.
+  If the generate skip marker is present or no go:generate directives are
+  found, the changeset is empty.
   """
   pub generate(ws: Workspace!): Changeset! {
-    if (skipGenerate(ws)) {
+    if (shouldGenerate(ws) == false) {
       directory.changes(directory)
     } else {
       let before = directory.withDirectory(path, source(ws).directory(path))

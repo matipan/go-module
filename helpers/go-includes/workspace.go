@@ -76,3 +76,24 @@ func (d daggerWorkspaceDirectory) readFile(ctx context.Context, filePath string)
 	}
 	return []byte(contents), nil
 }
+
+func (d daggerWorkspaceDirectory) search(ctx context.Context, pattern string, globs []string) ([]string, error) {
+	results, err := d.dir.Search(ctx, pattern, dagger.DirectorySearchOpts{
+		Globs:     globs,
+		Literal:   true,
+		FilesOnly: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	paths := make([]string, 0, len(results))
+	for _, result := range results {
+		filePath, err := result.FilePath(ctx)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, cleanWorkspacePath(filePath))
+	}
+	return paths, nil
+}

@@ -240,6 +240,51 @@ go 1.25
 	}
 }
 
+func TestGenerateModules(t *testing.T) {
+	ws := staticWorkspace{
+		"go.mod": `module example.com/root
+
+go 1.25
+`,
+		"main.go": `package root
+`,
+		"app/go.mod": `module example.com/app
+
+go 1.25
+`,
+		"app/generate.go": `package app
+
+//go:generate go run ./cmd/codegen
+`,
+		"app/nested/go.mod": `module example.com/nested
+
+go 1.25
+`,
+		"app/nested/generate.go": `package nested
+
+//go:generate go run ./cmd/codegen
+`,
+	}
+
+	got, err := generateModules(context.Background(), ws, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"app", "app/nested"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("modules mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+
+	got, err = generateModules(context.Background(), ws, "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"app"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered modules mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func TestAbsoluteIncludesIgnorePrefix(t *testing.T) {
 	got := addIncludePrefix("pkg", "/from-root.txt")
 	if got != "from-root.txt" {
@@ -323,6 +368,25 @@ func (d staticDirectory) readFile(_ context.Context, filePath string) ([]byte, e
 		return nil, os.ErrNotExist
 	}
 	return []byte(data), nil
+}
+
+func (d staticDirectory) search(_ context.Context, pattern string, globs []string) ([]string, error) {
+	var filePaths []string
+	for filePath := range d.files {
+		filePaths = append(filePaths, filePath)
+	}
+	sort.Strings(filePaths)
+
+	var matches []string
+	for _, filePath := range filePaths {
+		if !matchAny(d.include, filePath) || matchAny(d.exclude, filePath) || !matchAny(globs, filePath) {
+			continue
+		}
+		if strings.Contains(d.files[filePath], pattern) {
+			matches = append(matches, filePath)
+		}
+	}
+	return matches, nil
 }
 
 func (d staticDirectory) glob(_ context.Context, pattern string) ([]string, error) {

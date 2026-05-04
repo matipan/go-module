@@ -42,6 +42,8 @@ func main() {
 	switch os.Args[1] {
 	case "module":
 		includes, err = runModule(ctx, os.Args[2:])
+	case "generate-modules":
+		includes, err = runGenerateModules(ctx, os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -58,6 +60,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  go-includes module --path=DIR [--no-recursive]")
+	fmt.Fprintln(os.Stderr, "  go-includes generate-modules [--path=DIR]")
 }
 
 func runModule(ctx context.Context, args []string) (includes []string, rerr error) {
@@ -92,6 +95,34 @@ func runModule(ctx context.Context, args []string) (includes []string, rerr erro
 		attribute.Int("go_includes.include_count", len(includes)),
 	)
 	return includes, rerr
+}
+
+func runGenerateModules(ctx context.Context, args []string) (modules []string, rerr error) {
+	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes generate modules")
+	defer telemetry.EndWithCause(span, &rerr)
+
+	flags := newFlags("generate-modules")
+	modulePath := flags.String("path", "", "only report this workspace-relative Go module root")
+	if err := flags.Parse(args); err != nil {
+		return nil, err
+	}
+	if flags.NArg() != 0 {
+		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	ws, err := currentWorkspace(ctx)
+	if err != nil {
+		return nil, err
+	}
+	onlyModule := *modulePath
+	if onlyModule != "" {
+		onlyModule = cleanWorkspacePath(onlyModule)
+	}
+	modules, rerr = generateModules(ctx, daggerWorkspace{ws: ws}, onlyModule)
+	span.SetAttributes(
+		attribute.String("go_includes.module_path", onlyModule),
+		attribute.Int("go_includes.module_count", len(modules)),
+	)
+	return modules, rerr
 }
 
 func newFlags(name string) *flag.FlagSet {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"path"
 	"sort"
 	"strings"
 
@@ -18,6 +19,7 @@ type workspaceRoot interface {
 type workspaceDirectory interface {
 	glob(ctx context.Context, pattern string) ([]string, error)
 	readFile(ctx context.Context, filePath string) ([]byte, error)
+	search(ctx context.Context, pattern string, globs []string) ([]string, error)
 }
 
 var errNotRegularFile = errors.New("not a regular file")
@@ -100,7 +102,7 @@ func (d moduleDiscovery) addDirectiveIncludes(ctx context.Context, all, discover
 }
 
 func (d moduleDiscovery) nestedModuleExcludes(ctx context.Context) ([]string, error) {
-	goMods, err := d.workspace.directory([]string{"**/go.mod"}, nil).glob(ctx, "**/go.mod")
+	goMods, err := goModPaths(ctx, d.workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -177,6 +179,77 @@ func (d moduleDiscovery) addGoModReplaceIncludes(ctx context.Context, all, disco
 		attribute.Int("go_includes.include_count", discovered.len()-startCount),
 	)
 	return nil
+}
+
+func generateModules(ctx context.Context, workspace workspaceRoot, onlyModule string) ([]string, error) {
+	goMods, err := goModPaths(ctx, workspace)
+	if err != nil {
+		return nil, err
+	}
+
+	moduleSet := map[string]bool{}
+	for _, goModPath := range goMods {
+		moduleSet[modulePathForGoMod(goModPath)] = true
+	}
+
+	include := []string{"**/*.go"}
+	if onlyModule != "" {
+		include = []string{addIncludePrefix(onlyModule, "**/*.go")}
+	}
+	goFiles, err := workspace.directory(include, nil).search(ctx, "//go:generate", []string{"**/*.go"})
+	if err != nil {
+		return nil, err
+	}
+
+	hasGenerate := map[string]bool{}
+	for _, goFile := range goFiles {
+		modulePath, ok := containingModule(goFile, moduleSet)
+		if !ok {
+			continue
+		}
+		if onlyModule != "" && modulePath != onlyModule {
+			continue
+		}
+		hasGenerate[modulePath] = true
+	}
+
+	var modules []string
+	for _, goModPath := range goMods {
+		modulePath := modulePathForGoMod(goModPath)
+		if hasGenerate[modulePath] {
+			modules = append(modules, modulePath)
+		}
+	}
+	return modules, nil
+}
+
+func goModPaths(ctx context.Context, workspace workspaceRoot) ([]string, error) {
+	goMods, err := workspace.directory([]string{"**/go.mod"}, nil).glob(ctx, "**/go.mod")
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(goMods)
+	return goMods, nil
+}
+
+func modulePathForGoMod(goModPath string) string {
+	if goModPath == "go.mod" {
+		return "."
+	}
+	return strings.TrimSuffix(goModPath, "/go.mod")
+}
+
+func containingModule(filePath string, moduleSet map[string]bool) (string, bool) {
+	dir := path.Dir(cleanWorkspacePath(filePath))
+	for {
+		if moduleSet[dir] {
+			return dir, true
+		}
+		if dir == "." {
+			return "", false
+		}
+		dir = path.Dir(dir)
+	}
 }
 
 type includeSet struct {
