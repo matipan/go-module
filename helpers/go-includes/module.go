@@ -11,15 +11,19 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-type workspaceFiles interface {
-	glob(ctx context.Context, include, exclude []string, pattern string) ([]string, error)
+type workspaceRoot interface {
+	directory(include, exclude []string) workspaceDirectory
+}
+
+type workspaceDirectory interface {
+	glob(ctx context.Context, pattern string) ([]string, error)
 	readFile(ctx context.Context, filePath string) ([]byte, error)
 }
 
 var errNotRegularFile = errors.New("not a regular file")
 
 type moduleDiscovery struct {
-	workspace  workspaceFiles
+	workspace  workspaceRoot
 	modulePath string
 	recursive  bool
 }
@@ -61,13 +65,20 @@ func (d moduleDiscovery) addDirectiveIncludes(ctx context.Context, all, discover
 	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes scan directives")
 	defer telemetry.EndWithCause(span, &rerr)
 
-	goFiles, err := d.moduleGoFiles(ctx)
+	excludes, err := d.nestedModuleExcludes(ctx)
 	if err != nil {
 		return err
 	}
+	dir := d.workspace.directory([]string{addIncludePrefix(d.modulePath, "**/*.go")}, excludes)
+	goFiles, err := dir.glob(ctx, "**/*.go")
+	if err != nil {
+		return err
+	}
+	sort.Strings(goFiles)
+
 	startCount := discovered.len()
 	for _, filePath := range goFiles {
-		data, err := d.workspace.readFile(ctx, filePath)
+		data, err := dir.readFile(ctx, filePath)
 		if errors.Is(err, errNotRegularFile) {
 			continue
 		}
@@ -88,21 +99,8 @@ func (d moduleDiscovery) addDirectiveIncludes(ctx context.Context, all, discover
 	return nil
 }
 
-func (d moduleDiscovery) moduleGoFiles(ctx context.Context) ([]string, error) {
-	excludes, err := d.nestedModuleExcludes(ctx)
-	if err != nil {
-		return nil, err
-	}
-	goFiles, err := d.workspace.glob(ctx, []string{addIncludePrefix(d.modulePath, "**/*.go")}, excludes, "**/*.go")
-	if err != nil {
-		return nil, err
-	}
-	sort.Strings(goFiles)
-	return goFiles, nil
-}
-
 func (d moduleDiscovery) nestedModuleExcludes(ctx context.Context) ([]string, error) {
-	goMods, err := d.workspace.glob(ctx, []string{"**/go.mod"}, nil, "**/go.mod")
+	goMods, err := d.workspace.directory([]string{"**/go.mod"}, nil).glob(ctx, "**/go.mod")
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +132,8 @@ func (d moduleDiscovery) addGoModReplaceIncludes(ctx context.Context, all, disco
 	passCount := 0
 	startCount := discovered.len()
 	for {
-		goMods, err := d.workspace.glob(ctx, all.values(), nil, "**/go.mod")
+		dir := d.workspace.directory(all.values(), nil)
+		goMods, err := dir.glob(ctx, "**/go.mod")
 		if err != nil {
 			return err
 		}
@@ -155,7 +154,7 @@ func (d moduleDiscovery) addGoModReplaceIncludes(ctx context.Context, all, disco
 
 		passCount++
 		for _, goModPath := range newGoMods {
-			data, err := d.workspace.readFile(ctx, goModPath)
+			data, err := dir.readFile(ctx, goModPath)
 			if err != nil {
 				return err
 			}

@@ -268,37 +268,67 @@ type goDirectoryWorkspace struct {
 	dir string
 }
 
-func (w goDirectoryWorkspace) glob(ctx context.Context, include, exclude []string, pattern string) ([]string, error) {
-	matches, err := w.staticWorkspace.glob(ctx, include, exclude, pattern)
+func (w goDirectoryWorkspace) directory(include, exclude []string) workspaceDirectory {
+	return goDirectory{
+		staticDirectory: staticDirectory{
+			files:   w.staticWorkspace,
+			include: include,
+			exclude: exclude,
+		},
+		dir: w.dir,
+	}
+}
+
+type goDirectory struct {
+	staticDirectory
+	dir string
+}
+
+func (d goDirectory) glob(ctx context.Context, pattern string) ([]string, error) {
+	matches, err := d.staticDirectory.glob(ctx, pattern)
 	if err != nil {
 		return nil, err
 	}
-	if matchAny(include, w.dir) && !matchAny(exclude, w.dir) && matchTestPattern(pattern, w.dir) {
-		matches = append(matches, w.dir)
+	if matchAny(d.include, d.dir) && !matchAny(d.exclude, d.dir) && matchTestPattern(pattern, d.dir) {
+		matches = append(matches, d.dir)
 	}
 	sort.Strings(matches)
 	return matches, nil
 }
 
-func (w goDirectoryWorkspace) readFile(ctx context.Context, filePath string) ([]byte, error) {
-	if path.Clean(filePath) == w.dir {
+func (d goDirectory) readFile(ctx context.Context, filePath string) ([]byte, error) {
+	if path.Clean(filePath) == d.dir {
 		return nil, errNotRegularFile
 	}
-	return w.staticWorkspace.readFile(ctx, filePath)
+	return d.staticDirectory.readFile(ctx, filePath)
 }
 
-func (w staticWorkspace) readFile(_ context.Context, filePath string) ([]byte, error) {
-	data, ok := w[path.Clean(filePath)]
+func (w staticWorkspace) directory(include, exclude []string) workspaceDirectory {
+	return staticDirectory{
+		files:   w,
+		include: include,
+		exclude: exclude,
+	}
+}
+
+type staticDirectory struct {
+	files   staticWorkspace
+	include []string
+	exclude []string
+}
+
+func (d staticDirectory) readFile(_ context.Context, filePath string) ([]byte, error) {
+	data, ok := d.files[path.Clean(filePath)]
 	if !ok {
 		return nil, os.ErrNotExist
 	}
 	return []byte(data), nil
 }
 
-func (w staticWorkspace) glob(_ context.Context, include, exclude []string, pattern string) ([]string, error) {
+func (d staticDirectory) glob(_ context.Context, pattern string) ([]string, error) {
 	var matches []string
-	for filePath := range w {
-		if matchAny(include, filePath) && !matchAny(exclude, filePath) && matchTestPattern(pattern, filePath) {
+	for filePath := range d.files {
+		if matchAny(d.include, filePath) && !matchAny(d.exclude, filePath) && matchTestPattern(pattern, filePath) {
 			matches = append(matches, filePath)
 		}
 	}

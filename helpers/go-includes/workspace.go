@@ -46,22 +46,29 @@ type daggerWorkspace struct {
 	ws *dagger.Workspace
 }
 
-func (w daggerWorkspace) glob(ctx context.Context, include, exclude []string, pattern string) ([]string, error) {
-	return w.ws.Directory("/", dagger.WorkspaceDirectoryOpts{
+func (w daggerWorkspace) directory(include, exclude []string) workspaceDirectory {
+	return daggerWorkspaceDirectory{dir: w.ws.Directory("/", dagger.WorkspaceDirectoryOpts{
 		Include: include,
 		Exclude: exclude,
-	}).Glob(ctx, pattern)
+	})}
 }
 
-func (w daggerWorkspace) readFile(ctx context.Context, filePath string) ([]byte, error) {
+type daggerWorkspaceDirectory struct {
+	dir *dagger.Directory
+}
+
+func (d daggerWorkspaceDirectory) glob(ctx context.Context, pattern string) ([]string, error) {
+	return d.dir.Glob(ctx, pattern)
+}
+
+func (d daggerWorkspaceDirectory) readFile(ctx context.Context, filePath string) ([]byte, error) {
 	cleanPath := cleanWorkspacePath(filePath)
 	if escapesWorkspace(cleanPath) {
 		return nil, fmt.Errorf("path escapes workspace: %s", filePath)
 	}
-	dir := w.ws.Directory("/", dagger.WorkspaceDirectoryOpts{Include: []string{cleanPath}})
-	contents, err := dir.File(cleanPath).Contents(ctx)
+	contents, err := d.dir.File(cleanPath).Contents(ctx)
 	if err != nil {
-		fileType, statErr := dir.Stat(cleanPath).FileType(ctx)
+		fileType, statErr := d.dir.Stat(cleanPath).FileType(ctx)
 		if statErr == nil && fileType == dagger.FileTypeDirectory {
 			return nil, errNotRegularFile
 		}
