@@ -3,12 +3,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"unicode"
@@ -38,12 +41,10 @@ func main() {
 		err      error
 	)
 	switch os.Args[1] {
-	case "source":
-		includes, err = runSource(ctx, os.Args[2:])
-	case "gomod":
-		includes, err = runGoMod(ctx, os.Args[2:])
-	case "imports":
-		includes, err = runImports(ctx, os.Args[2:])
+	case "from-go-directives":
+		includes, err = runFromGoDirectives(ctx, os.Args[2:])
+	case "from-go-mod-replace":
+		includes, err = runFromGoModReplace(ctx, os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -59,74 +60,58 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  go-includes source --add-prefix=DIR -- FILE.go")
-	fmt.Fprintln(os.Stderr, "  go-includes gomod  [--no-recursive] -- go.mod [go.mod...]")
-	fmt.Fprintln(os.Stderr, "  go-includes imports -- include-pattern [include-pattern...]")
+	fmt.Fprintln(os.Stderr, "  go-includes from-go-directives [--add-prefix=DIR] [-- FILE.go [FILE.go...]]")
+	fmt.Fprintln(os.Stderr, "  go-includes from-go-mod-replace [--no-recursive] [-- go.mod [go.mod...]]")
+	fmt.Fprintln(os.Stderr, "  When no paths are passed, paths are read from stdin, one per line.")
 }
 
-func runSource(ctx context.Context, args []string) (includes []string, rerr error) {
-	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes source")
+func runFromGoDirectives(ctx context.Context, args []string) (includes []string, rerr error) {
+	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes from-go-directives")
 	defer telemetry.EndWithCause(span, &rerr)
 
-	flags := newFlags("source")
+	flags := newFlags("from-go-directives")
 	prefix := flags.String("add-prefix", "", "prefix to add to relative include patterns")
 	if err := flags.Parse(args); err != nil {
 		return nil, err
 	}
-	if flags.NArg() != 1 {
-		flags.Usage()
-		os.Exit(2)
+	paths, err := inputPaths(flags.Args(), os.Stdin)
+	if err != nil {
+		return nil, err
 	}
-	span.SetAttributes(attribute.String("go_includes.file", flags.Arg(0)))
-	includes, rerr = sourceIncludes(flags.Arg(0), *prefix)
+	span.SetAttributes(attribute.Int("go_includes.file_count", len(paths)))
+	for _, filePath := range paths {
+		includePrefix := *prefix
+		if includePrefix == "" {
+			includePrefix = includePrefixForGoFile(filePath)
+		}
+		fileIncludes, err := goDirectiveIncludes(filePath, includePrefix)
+		if err != nil {
+			return nil, err
+		}
+		includes = append(includes, fileIncludes...)
+	}
 	span.SetAttributes(attribute.Int("go_includes.include_count", len(includes)))
 	return includes, rerr
 }
 
-func runGoMod(ctx context.Context, args []string) (includes []string, rerr error) {
-	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes gomod")
+func runFromGoModReplace(ctx context.Context, args []string) (includes []string, rerr error) {
+	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes from-go-mod-replace")
 	defer telemetry.EndWithCause(span, &rerr)
 
-	flags := newFlags("gomod")
+	flags := newFlags("from-go-mod-replace")
 	noRecursive := flags.Bool("no-recursive", false, "only scan go.mod files passed on the command line")
 	if err := flags.Parse(args); err != nil {
 		return nil, err
 	}
-	if flags.NArg() == 0 {
-		flags.Usage()
-		os.Exit(2)
-	}
-	span.SetAttributes(
-		attribute.Int("go_includes.seed_go_mod_count", flags.NArg()),
-		attribute.Bool("go_includes.recursive", !*noRecursive),
-	)
-	includes, rerr = goModIncludes(ctx, flags.Args(), !*noRecursive, sourceFileContents)
-	span.SetAttributes(attribute.Int("go_includes.include_count", len(includes)))
-	return includes, rerr
-}
-
-func runImports(ctx context.Context, args []string) (includes []string, rerr error) {
-	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes imports")
-	defer telemetry.EndWithCause(span, &rerr)
-
-	flags := newFlags("imports")
-	if err := flags.Parse(args); err != nil {
-		return nil, err
-	}
-	if flags.NArg() == 0 {
-		flags.Usage()
-		os.Exit(2)
-	}
-	goMods, goFiles, err := workspaceGoSeeds(ctx, flags.Args())
+	paths, err := inputPaths(flags.Args(), os.Stdin)
 	if err != nil {
 		return nil, err
 	}
 	span.SetAttributes(
-		attribute.Int("go_includes.seed_include_count", flags.NArg()),
-		attribute.Int("go_includes.seed_go_mod_count", len(goMods)),
-		attribute.Int("go_includes.seed_go_file_count", len(goFiles)),
+		attribute.Int("go_includes.seed_go_mod_count", len(paths)),
+		attribute.Bool("go_includes.recursive", !*noRecursive),
 	)
-	includes, rerr = localImportIncludes(ctx, goMods, goFiles, sourceFileContents, sourceGlob)
+	includes, rerr = goModIncludes(ctx, paths, !*noRecursive, sourceFileContents)
 	span.SetAttributes(attribute.Int("go_includes.include_count", len(includes)))
 	return includes, rerr
 }
@@ -140,7 +125,31 @@ func newFlags(name string) *flag.FlagSet {
 	return flags
 }
 
-func sourceIncludes(filePath, prefix string) ([]string, error) {
+func inputPaths(args []string, stdin io.Reader) ([]string, error) {
+	if len(args) > 0 {
+		return args, nil
+	}
+
+	var paths []string
+	scanner := bufio.NewScanner(stdin)
+	for scanner.Scan() {
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		if line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths, scanner.Err()
+}
+
+func goDirectiveIncludes(filePath, prefix string) ([]string, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, nil
+	}
+
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, filePath, nil, parser.ParseComments)
 	if err != nil {
@@ -162,6 +171,15 @@ func sourceIncludes(filePath, prefix string) ([]string, error) {
 	return includes, nil
 }
 
+func includePrefixForGoFile(filePath string) string {
+	filePath = strings.TrimPrefix(filePath, sourceRoot+"/")
+	fileDir := path.Dir(filePath)
+	if fileDir == "." {
+		return ""
+	}
+	return fileDir
+}
+
 func includePatternsFromComment(comment string) ([]string, error) {
 	if strings.HasPrefix(comment, "//go:embed") {
 		args := strings.TrimPrefix(comment, "//go:embed")
@@ -178,6 +196,18 @@ func includePatternsFromComment(comment string) ([]string, error) {
 		return patterns, nil
 	}
 
+	if strings.HasPrefix(comment, "//go:generate") {
+		args := strings.TrimPrefix(comment, "//go:generate")
+		if args != "" && !startsWithSpace(args) {
+			return nil, nil
+		}
+		parsed, err := parseDirectiveArgs("go:generate", args)
+		if err != nil {
+			return nil, err
+		}
+		return goGenerateIncludes(parsed), nil
+	}
+
 	text := strings.TrimSpace(strings.TrimPrefix(comment, "//"))
 	if !strings.HasPrefix(text, "workspace:include") {
 		return nil, nil
@@ -187,6 +217,51 @@ func includePatternsFromComment(comment string) ([]string, error) {
 		return nil, nil
 	}
 	return parseDirectiveArgs("workspace:include", args)
+}
+
+func goGenerateIncludes(args []string) []string {
+	if len(args) == 0 || args[0] != "go" {
+		return nil
+	}
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "-C" {
+			if i+1 >= len(args) {
+				return nil
+			}
+			return goModuleSourceIncludes(args[i+1])
+		}
+		if dir, ok := strings.CutPrefix(arg, "-C="); ok {
+			return goModuleSourceIncludes(dir)
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return nil
+		}
+	}
+	return nil
+}
+
+func goModuleSourceIncludes(dir string) []string {
+	patterns := []string{
+		"**/*.go",
+		"**/*.c",
+		"**/*.h",
+		"**/*.s",
+		"**/*.S",
+		"**/*.syso",
+		"go.mod",
+		"go.sum",
+		"go.work",
+		"go.work.sum",
+	}
+	dir = strings.TrimSuffix(dir, "/")
+	if dir == "" || dir == "." {
+		return patterns
+	}
+	for i, pattern := range patterns {
+		patterns[i] = dir + "/" + pattern
+	}
+	return patterns
 }
 
 func parseDirectiveArgs(name, args string) ([]string, error) {

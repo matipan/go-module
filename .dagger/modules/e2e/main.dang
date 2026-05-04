@@ -161,8 +161,11 @@ type E2e {
       "go.mod replace includes did not include recursively discovered replace target",
     )
     assert(
-      containsPath(includedGoMod.includeFromGoImports(ws), "fixtures/go-module-with-included-gomod-replace/internal/helper/**"),
-      "go imports includes did not include local package imported by included generator",
+      containsPath(
+        includedGoMod.includeFromGoDirectives(ws),
+        "fixtures/go-module-with-included-gomod-replace/sdk/go/../../**/*.go",
+      ),
+      "go:generate -C did not include generator module Go files",
     )
     null
   }

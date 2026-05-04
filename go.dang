@@ -17,6 +17,10 @@ type Go {
   """
   pub includeExtraFiles: [String!]! = []
 
+  pub noLintFilename: String! = ".dagger-no-lint"
+  pub noTestFilename: String! = ".dagger-no-test"
+  pub noGenerateFilename: String! = ".dagger-no-generate"
+
   """
   Require each Go module to contain the opt-in marker before tests or generate run.
   """
@@ -180,8 +184,8 @@ type GoModule {
   }
 
   """
-  Workspace include patterns discovered from go:embed and workspace:include
-  directives in this module's Go files.
+  Workspace include patterns discovered from go:embed, go:generate, and
+  workspace:include directives in this module's Go files.
   """
   pub includeFromGoDirectives(ws: Workspace!): [String!]! {
     let nestedModuleExcludes = ws
@@ -214,15 +218,14 @@ type GoModule {
     if (goFiles.length == 0) {
       [] :: [String!]!
     } else {
-      let source = ws.directory("/", include: goFiles)
-      goFiles.reduce([] :: [String!]!) { includes, filePath =>
-        let fileDir = filePath.split("/").dropLast.join("/")
-        includes + goIncludesHelper(source)
-          .withExec(["go", "run", ".", "source", "--add-prefix=" + fileDir, "--", "/src/" + filePath])
-          .stdout
-          .split("\n")
-          .filter { pattern => pattern != "" }
-      }
+      goIncludesHelper(ws.directory("/", include: goFiles))
+        .withExec(
+          ["go", "run", ".", "from-go-directives"],
+          stdin: goFiles.map { filePath => "/src/" + filePath }.join("\n"),
+        )
+        .stdout
+        .split("\n")
+        .filter { pattern => pattern != "" }
     }
   }
 
@@ -238,24 +241,14 @@ type GoModule {
       [] :: [String!]!
     } else {
       goIncludesHelper(ws.directory("/", include: ["**/go.mod"]))
-        .withExec(["go", "run", ".", "gomod", "--"] + goModPaths)
+        .withExec(
+          ["go", "run", ".", "from-go-mod-replace"],
+          stdin: goModPaths.join("\n"),
+        )
         .stdout
         .split("\n")
         .filter { pattern => pattern != "" }
     }
-  }
-
-  """
-  Workspace include patterns for local Go packages imported by selected Go files.
-  """
-  pub includeFromGoImports(ws: Workspace!): [String!]! {
-    let sourceIncludes = includeBase + includeExtraFiles + includeFromGoDirectives(ws)
-    goIncludesHelper(ws.directory("/", include: ["**/*.go", "**/go.mod"]))
-      .withEnvVariable("DAGGER_GO_HELPER_WORKSPACE_ID", toString(ws))
-      .withExec(["go", "run", ".", "imports", "--"] + sourceIncludes, experimentalPrivilegedNesting: true)
-      .stdout
-      .split("\n")
-      .filter { pattern => pattern != "" }
   }
 
   """
@@ -280,7 +273,7 @@ type GoModule {
   Final workspace include patterns used to build this module's source directory.
   """
   pub include(ws: Workspace!): [String!]! {
-    includeBase + includeExtraFiles + includeFromGoDirectives(ws) + includeFromGoModReplace(ws) + includeFromGoImports(ws)
+    includeBase + includeExtraFiles + includeFromGoDirectives(ws) + includeFromGoModReplace(ws)
   }
 
   """
