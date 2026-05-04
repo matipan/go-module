@@ -17,20 +17,20 @@ type Go {
   """
   pub includeExtraFiles: [String!]! = []
 
-  pub noLintFilename: String! = ".dagger-no-lint"
-  pub noTestFilename: String! = ".dagger-no-test"
-  pub noGenerateFilename: String! = ".dagger-no-generate"
+  """
+  Marker filename that skips lint checks when present at a Go module root.
+  """
+  pub skipLintFilename: String! = ".dagger-skip-lint"
 
   """
-  Require each Go module to contain the opt-in marker before tests or generate run.
+  Marker filename that skips tests when present at a Go module root.
   """
-  pub goModulesMustOptIn: Boolean! = false
+  pub skipTestFilename: String! = ".dagger-skip-test"
 
   """
-  Opt-in marker filename checked at each Go module root.
-  Only used when goModulesMustOptIn is true.
+  Marker filename that skips go generate when present at a Go module root.
   """
-  pub goModuleOptInFilename: String! = ".dagger-go-opt-in"
+  pub skipGenerateFilename: String! = ".dagger-skip-generate"
 
   """
   Return every Go module discovered from workspace go.mod files.
@@ -71,17 +71,19 @@ type Go {
       },
       version: version,
       includeExtraFiles: includeExtraFiles,
-      mustOptIn: goModulesMustOptIn,
-      optInFilename: goModuleOptInFilename,
+      skipLintFilename: skipLintFilename,
+      skipTestFilename: skipTestFilename,
+      skipGenerateFilename: skipGenerateFilename,
     )
   }
 
   """
   Run tests in every discovered Go module.
-  When opt-in is required, modules without the marker are skipped.
+  Modules with the test skip marker are skipped.
   """
   pub testAll(ws: Workspace!): Void @check {
-    let layers = modules(ws).reduce(directory) { layers, mod =>
+    let mods = modules(ws).filter { mod => mod.skipTest(ws) == false }
+    let layers = mods.reduce(directory) { layers, mod =>
       layers.withDirectory(
         mod.path,
         directory.withFile("go.mod", mod.testExec(ws).file("go.mod")),
@@ -97,10 +99,10 @@ type Go {
 
   """
   Run go generate in every discovered Go module.
-  When opt-in is required, modules without the marker are skipped.
+  Modules with the generate skip marker are skipped.
   """
   pub generate(ws: Workspace!): Changeset! @generate {
-    let mods = modules(ws).filter { mod => mod.shouldIgnore(ws) == false }
+    let mods = modules(ws).filter { mod => mod.skipGenerate(ws) == false }
     let before = mods.reduce(directory) { before, mod =>
       before.withDirectory(mod.path, mod.source(ws).directory(mod.path))
     }
@@ -132,14 +134,19 @@ type GoModule {
   pub includeExtraFiles: [String!]!
 
   """
-  Whether this module requires an opt-in marker before tests or generate run.
+  Marker filename that skips lint checks when present at this module root.
   """
-  pub mustOptIn: Boolean!
+  let skipLintFilename: String!
 
   """
-  Marker filename used when this module must opt in.
+  Marker filename that skips tests when present at this module root.
   """
-  let optInFilename: String!
+  let skipTestFilename: String!
+
+  """
+  Marker filename that skips go generate when present at this module root.
+  """
+  let skipGenerateFilename: String!
 
   """
   Return a workspace-root path for a module-relative subpath.
@@ -167,20 +174,34 @@ type GoModule {
   }
 
   """
-  Whether this module root contains the configured opt-in marker.
+  Whether this module root contains the configured lint skip marker.
   """
-  pub optedIn(ws: Workspace!): Boolean! {
-    ws
-      .directory("/", include: [subpath(optInFilename)])
-      .glob(subpath(optInFilename))
-      .length > 0
+  pub skipLint(ws: Workspace!): Boolean! {
+    hasMarker(ws, skipLintFilename)
   }
 
   """
-  Whether tests and generate should skip this module under the current opt-in policy.
+  Whether this module root contains the configured test skip marker.
   """
-  pub shouldIgnore(ws: Workspace!): Boolean! {
-    mustOptIn and optedIn(ws) == false
+  pub skipTest(ws: Workspace!): Boolean! {
+    hasMarker(ws, skipTestFilename)
+  }
+
+  """
+  Whether this module root contains the configured generate skip marker.
+  """
+  pub skipGenerate(ws: Workspace!): Boolean! {
+    hasMarker(ws, skipGenerateFilename)
+  }
+
+  """
+  Whether this module root contains a marker filename.
+  """
+  let hasMarker(ws: Workspace!, filename: String!): Boolean! {
+    ws
+      .directory("/", include: [subpath(filename)])
+      .glob(subpath(filename))
+      .length > 0
   }
 
   """
@@ -313,7 +334,7 @@ type GoModule {
 
   """
   Run tests in this module.
-  When opt-in is required and this module has no marker, tests are skipped.
+  If the test skip marker is present, no tests are run.
   """
   pub test(ws: Workspace!): Void @check {
     testExec(ws).sync
@@ -322,16 +343,16 @@ type GoModule {
 
   """
   Changes made by running go generate in this module.
-  When opt-in is required and this module has no marker, the changeset is empty.
+  If the generate skip marker is present, the changeset is empty.
   """
   pub generate(ws: Workspace!): Changeset! {
-    let before = directory.withDirectory(path, source(ws).directory(path))
-    let after = if (shouldIgnore(ws)) {
-      before
+    if (skipGenerate(ws)) {
+      directory.changes(directory)
     } else {
-      before.withDirectory(path, generateExec(ws).directory("."))
+      let before = directory.withDirectory(path, source(ws).directory(path))
+      let after = before.withDirectory(path, generateExec(ws).directory("."))
+      after.changes(before)
     }
-    after.changes(before)
   }
 
   """
@@ -348,7 +369,7 @@ type GoModule {
   Container synced by this module's test check.
   """
   let testExec(ws: Workspace!): Container! {
-    if (shouldIgnore(ws)) {
+    if (skipTest(ws)) {
       base
         .withDirectory(".", ws.directory("/", include: [subpath("go.mod")]))
         .withWorkdir(path)

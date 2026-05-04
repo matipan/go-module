@@ -19,14 +19,11 @@ type E2e {
   }
 
   """
-  Run testAll against one opted-in fixture module.
+  Run testAll while respecting per-module skip markers.
   """
   pub singleModuleCheck(ws: Workspace!): Void @check {
-    go(
-      version: "1.25",
-      goModulesMustOptIn: true,
-    ).testAll(ws)
-    go(version: "1.25", goModulesMustOptIn: true).module(ws, "testdata/go-module-excluded").test(ws)
+    go(version: "1.25").testAll(ws)
+    go(version: "1.25").module(ws, "testdata/go-module-excluded").test(ws)
   }
 
   """
@@ -90,29 +87,27 @@ type E2e {
       "module base includes exposed workspace-wide Go pattern",
     )
 
-    let optInTool = go(version: "1.25", goModulesMustOptIn: true)
-    let optedIn = optInTool.module(ws, "testdata/go-module-with-testdata")
+    let skipped = go(version: "1.25").module(ws, "testdata/go-module-excluded")
     assert(
-      optedIn.mustOptIn == true,
-      "module did not inherit opt-in requirement",
+      skipped.skipLint(ws),
+      "module did not detect lint skip marker",
     )
     assert(
-      optedIn.optedIn(ws),
-      "module did not detect opt-in marker",
+      skipped.skipTest(ws),
+      "module did not detect test skip marker",
     )
     assert(
-      optedIn.shouldIgnore(ws) == false,
-      "opted-in module was ignored",
+      skipped.skipGenerate(ws),
+      "module did not detect generate skip marker",
     )
 
-    let ignored = optInTool.module(ws, "fixtures/go-module-with-replace")
     assert(
-      ignored.optedIn(ws) == false,
-      "module without marker reported opted in",
+      mod.skipTest(ws) == false,
+      "module without marker reported skipped tests",
     )
     assert(
-      ignored.shouldIgnore(ws),
-      "module without marker was not ignored",
+      mod.skipGenerate(ws) == false,
+      "module without marker reported skipped generate",
     )
 
     assert(
@@ -171,7 +166,7 @@ type E2e {
   }
 
   """
-  Run go generate in one opted-in fixture module and verify its changeset.
+  Run go generate and verify its changeset.
   """
   pub generateCheck(ws: Workspace!): Void @check {
     go(version: "1.25")
@@ -180,11 +175,7 @@ type E2e {
       .layer
       .sync
 
-    let changes = go(
-      version: "1.25",
-      goModulesMustOptIn: true,
-      goModuleOptInFilename: ".dagger-go-generate",
-    ).generate(ws)
+    let changes = go(version: "1.25").generate(ws)
 
     assert(
       changes.addedPaths.length == 1,
@@ -211,38 +202,19 @@ type E2e {
 
     let emptyChanges = go(
       version: "1.25",
-      goModulesMustOptIn: true,
-      goModuleOptInFilename: ".missing-opt-in",
-    ).generate(ws)
+      skipGenerateFilename: ".dagger-skip-generate-e2e",
+    ).module(ws, generatedFixturePath).generate(ws)
     assert(
       emptyChanges.addedPaths.length == 0,
-      "fully ignored generate produced added paths",
+      "skipped module generate produced added paths",
     )
     assert(
       emptyChanges.modifiedPaths.length == 0,
-      "fully ignored generate produced modified paths",
+      "skipped module generate produced modified paths",
     )
     assert(
       emptyChanges.removedPaths.length == 0,
-      "fully ignored generate produced removed paths",
-    )
-
-    let ignoredModuleChanges = go(
-      version: "1.25",
-      goModulesMustOptIn: true,
-      goModuleOptInFilename: ".missing-opt-in",
-    ).module(ws, generatedFixturePath).generate(ws)
-    assert(
-      ignoredModuleChanges.addedPaths.length == 0,
-      "ignored module generate produced added paths",
-    )
-    assert(
-      ignoredModuleChanges.modifiedPaths.length == 0,
-      "ignored module generate produced modified paths",
-    )
-    assert(
-      ignoredModuleChanges.removedPaths.length == 0,
-      "ignored module generate produced removed paths",
+      "skipped module generate produced removed paths",
     )
 
     null
