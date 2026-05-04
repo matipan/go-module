@@ -101,6 +101,20 @@ type E2e {
       "module did not detect generate skip marker",
     )
 
+    let treeSkipped = go(version: "1.25").module(ws, "testdata/go-module-skip-tree/nested")
+    assert(
+      treeSkipped.skipLint(ws),
+      "nested module did not inherit lint skip marker from ancestor",
+    )
+    assert(
+      treeSkipped.skipTest(ws),
+      "nested module did not inherit test skip marker from ancestor",
+    )
+    assert(
+      treeSkipped.skipGenerate(ws),
+      "nested module did not inherit generate skip marker from ancestor",
+    )
+
     assert(
       mod.skipTest(ws) == false,
       "module without marker reported skipped tests",
