@@ -326,166 +326,284 @@ type discoveredInputs struct {
 	modules  []string
 }
 
-// scanModuleDirectives scans Go files in one module, excluding nested modules.
+// scanModuleDirectives scans Go directives in one module.
 func (t target) scanModuleDirectives(ctx context.Context, modulePath string) (_ discoveredInputs, rerr error) {
 	ctx, span := Tracer(ctx).Start(ctx, "go-includes scan directives")
 	defer telemetry.EndWithCause(span, &rerr)
 
+	directives, goFileCount, err := t.goDirectives(ctx, modulePath)
+	if err != nil {
+		return discoveredInputs{}, err
+	}
+	scan, err := t.includesFromGoDirectives(directives)
+	if err != nil {
+		return discoveredInputs{}, err
+	}
+	span.SetAttributes(
+		attribute.String("go_includes.mode", t.modeString()),
+		attribute.String("go_includes.module_path", modulePath),
+		attribute.Int("go_includes.file_count", goFileCount),
+		attribute.Int("go_includes.include_count", len(scan.includes)),
+		attribute.Int("go_includes.discovered_module_count", len(scan.modules)),
+	)
+	return scan, nil
+}
+
+// goDirectives returns parsed Go comment directives for one module.
+func (t target) goDirectives(ctx context.Context, modulePath string) ([]goDirective, int, error) {
 	excludes := t.workspace.nestedModuleExcludes(modulePath)
 	dir := t.workspace.directory([]string{addIncludePrefix(modulePath, "**/*.go")}, excludes)
 	goFiles, err := dir.Glob(ctx, "**/*.go")
 	if err != nil {
-		return discoveredInputs{}, err
+		return nil, 0, err
 	}
 	sort.Strings(goFiles)
 
-	var includes []string
-	var modules []string
+	var directives []goDirective
 	for _, filePath := range goFiles {
 		data, err := readRegularFile(ctx, dir, filePath)
 		if errors.Is(err, errNotRegularFile) {
 			continue
 		}
 		if err != nil {
-			return discoveredInputs{}, err
+			return nil, 0, err
 		}
-		fileScan, err := scanGoFileDirectives(filePath, data, t.test, t.generate)
+		fileDirectives, err := goDirectivesInFile(filePath, data)
+		if err != nil {
+			return nil, 0, err
+		}
+		directives = append(directives, fileDirectives...)
+	}
+	return directives, len(goFiles), nil
+}
+
+// includesFromGoDirectives resolves directive inputs for the target mode.
+func (t target) includesFromGoDirectives(directives []goDirective) (discoveredInputs, error) {
+	var scan discoveredInputs
+	for _, directive := range directives {
+		includes, err := directive.includes(t.test, t.lint, t.generate)
 		if err != nil {
 			return discoveredInputs{}, err
 		}
-		includes = append(includes, fileScan.includes...)
-		for _, workdir := range fileScan.modules {
-			module, ok := t.workspace.containingModuleDir(workdir)
-			if !ok {
-				return discoveredInputs{}, fmt.Errorf("%s: no Go module found for go -C directory: %s", filePath, workdir)
-			}
-			modules = append(modules, module)
+		scan.includes = append(scan.includes, includes...)
+		if !t.generate || !directive.isGenerate() {
+			continue
 		}
-	}
-	span.SetAttributes(
-		attribute.String("go_includes.mode", t.modeString()),
-		attribute.String("go_includes.module_path", modulePath),
-		attribute.Int("go_includes.file_count", len(goFiles)),
-		attribute.Int("go_includes.include_count", len(includes)),
-		attribute.Int("go_includes.discovered_module_count", len(modules)),
-	)
-	return discoveredInputs{includes: includes, modules: modules}, nil
-}
-
-// scanGoFileDirectives parses one Go file and resolves directive paths.
-func scanGoFileDirectives(filePath string, data []byte, test, generate bool) (discoveredInputs, error) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments)
-	if err != nil {
-		return discoveredInputs{}, err
-	}
-
-	filePath = cleanWorkspacePath(filePath)
-	prefix := path.Dir(filePath)
-	if prefix == "." {
-		prefix = ""
-	}
-
-	scan := discoveredInputs{}
-	for _, group := range file.Comments {
-		for _, comment := range group.List {
-			commentScan, err := scanCommentDirective(comment.Text, test, generate)
-			if err != nil {
-				return discoveredInputs{}, fmt.Errorf("%s: %w", fset.Position(comment.Slash), err)
-			}
-			for _, pattern := range commentScan.includes {
-				scan.includes = append(scan.includes, addIncludePrefix(prefix, pattern))
-			}
-			for _, workdir := range commentScan.modules {
-				scan.modules = append(scan.modules, cleanWorkspacePath(addIncludePrefix(prefix, workdir)))
-			}
+		if !directive.isGenerateGoDashC() {
+			continue
 		}
+		workdir, err := directive.generateGoDashCValue()
+		if err != nil {
+			return discoveredInputs{}, err
+		}
+		workdir = cleanWorkspacePath(addIncludePrefix(directive.dir(), workdir))
+		if t.workspace == nil {
+			scan.modules = append(scan.modules, workdir)
+			continue
+		}
+		module, ok := t.workspace.containingModuleDir(workdir)
+		if !ok {
+			return discoveredInputs{}, fmt.Errorf("%s: no Go module found for go -C directory: %s", directive.position, workdir)
+		}
+		scan.modules = append(scan.modules, module)
 	}
 	return scan, nil
 }
 
-// scanCommentDirective extracts supported include directives from one comment.
-func scanCommentDirective(comment string, test, generate bool) (discoveredInputs, error) {
-	if args, ok := directiveArguments(comment, "go:embed"); ok {
-		patterns, err := parseDirectiveArgs("go:embed", args)
+// scanGoFileDirectives parses one Go file and resolves directive paths.
+func scanGoFileDirectives(filePath string, data []byte, test, generate bool) (discoveredInputs, error) {
+	directives, err := goDirectivesInFile(filePath, data)
+	if err != nil {
+		return discoveredInputs{}, err
+	}
+	return (target{test: test, generate: generate}).includesFromGoDirectives(directives)
+}
+
+// goDirectivesInFile extracts Go comment directives from one parsed Go file.
+func goDirectivesInFile(filePath string, data []byte) ([]goDirective, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+
+	filePath = cleanWorkspacePath(filePath)
+	var directives []goDirective
+	for _, group := range file.Comments {
+		for _, comment := range group.List {
+			directive := goDirective{
+				filePath: filePath,
+				position: fset.Position(comment.Slash).String(),
+				comment:  comment.Text,
+			}
+			if directive.isKnown() {
+				directives = append(directives, directive)
+			}
+		}
+	}
+	return directives, nil
+}
+
+// goDirective is one supported Go line directive comment.
+type goDirective struct {
+	filePath string
+	position string
+	comment  string
+}
+
+// dir returns the directive's workspace directory.
+func (d goDirective) dir() string {
+	dir := path.Dir(cleanWorkspacePath(d.filePath))
+	if dir == "." {
+		return ""
+	}
+	return dir
+}
+
+// isKnown reports whether the directive is relevant to include discovery.
+func (d goDirective) isKnown() bool {
+	return d.isEmbed() || d.isTestInclude() || d.isGenerateInclude() || d.isGenerate()
+}
+
+// isEmbed reports whether the directive is //go:embed.
+func (d goDirective) isEmbed() bool {
+	return d.hasName("go:embed")
+}
+
+// isTestInclude reports whether the directive is //go:test:include.
+func (d goDirective) isTestInclude() bool {
+	return d.hasName("go:test:include")
+}
+
+// isGenerateInclude reports whether the directive is //go:generate:include.
+func (d goDirective) isGenerateInclude() bool {
+	return d.hasName("go:generate:include")
+}
+
+// isGenerate reports whether the directive is //go:generate.
+func (d goDirective) isGenerate() bool {
+	return d.hasName("go:generate")
+}
+
+// isGenerateGoDashC reports whether the directive is a go command with -C.
+func (d goDirective) isGenerateGoDashC() bool {
+	_, ok, _ := d.generateGoDashC()
+	return ok
+}
+
+// args parses the directive arguments.
+func (d goDirective) args() ([]string, error) {
+	name, argString, ok := d.nameAndArgs()
+	if !ok {
+		return nil, nil
+	}
+	args, err := parseDirectiveArgs(name, argString)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", d.position, err)
+	}
+	return args, nil
+}
+
+// generateGoDashCValue returns the -C value for a generate directive, if present.
+func (d goDirective) generateGoDashCValue() (string, error) {
+	workdir, _, err := d.generateGoDashC()
+	return workdir, err
+}
+
+// includes returns include patterns enabled by the target modes.
+func (d goDirective) includes(test, lint, generate bool) ([]string, error) {
+	if d.isEmbed() {
+		patterns, err := d.args()
 		if err != nil {
-			return discoveredInputs{}, err
+			return nil, err
 		}
 		for i, pattern := range patterns {
 			patterns[i] = strings.TrimPrefix(pattern, "all:")
 		}
-		return discoveredInputs{includes: patterns}, nil
+		return d.prefixed(patterns), nil
 	}
-
-	if test {
-		if args, ok := directiveArguments(comment, "go:test:include"); ok {
-			patterns, err := parseDirectiveArgs("go:test:include", args)
-			if err != nil {
-				return discoveredInputs{}, err
-			}
-			return discoveredInputs{includes: patterns}, nil
-		}
-	}
-
-	if generate {
-		if args, ok := directiveArguments(comment, "go:generate:include"); ok {
-			patterns, err := parseDirectiveArgs("go:generate:include", args)
-			if err != nil {
-				return discoveredInputs{}, err
-			}
-			return discoveredInputs{includes: patterns}, nil
-		}
-
-		args, ok := directiveArguments(comment, "go:generate")
-		if !ok {
-			return discoveredInputs{}, nil
-		}
-		parsed, err := parseDirectiveArgs("go:generate", args)
+	if test && d.isTestInclude() {
+		patterns, err := d.args()
 		if err != nil {
-			return discoveredInputs{}, err
+			return nil, err
 		}
-		if workdir, ok := goGenerateWorkdir(parsed); ok {
-			return discoveredInputs{modules: []string{workdir}}, nil
-		}
+		return d.prefixed(patterns), nil
 	}
-
-	return discoveredInputs{}, nil
+	if generate && d.isGenerateInclude() {
+		patterns, err := d.args()
+		if err != nil {
+			return nil, err
+		}
+		return d.prefixed(patterns), nil
+	}
+	return nil, nil
 }
 
-// directiveArguments returns the argument tail for an exact line directive name.
-func directiveArguments(comment, name string) (string, bool) {
+// prefixed resolves directive patterns relative to the directive's file.
+func (d goDirective) prefixed(patterns []string) []string {
+	for i, pattern := range patterns {
+		patterns[i] = addIncludePrefix(d.dir(), pattern)
+	}
+	return patterns
+}
+
+// hasName reports whether the directive has the exact directive name.
+func (d goDirective) hasName(name string) bool {
+	_, ok := d.argsForName(name)
+	return ok
+}
+
+// nameAndArgs returns the directive name and raw argument tail.
+func (d goDirective) nameAndArgs() (string, string, bool) {
+	for _, name := range []string{"go:embed", "go:test:include", "go:generate:include", "go:generate"} {
+		if args, ok := d.argsForName(name); ok {
+			return name, args, true
+		}
+	}
+	return "", "", false
+}
+
+// argsForName returns the argument tail for an exact line directive name.
+func (d goDirective) argsForName(name string) (string, bool) {
 	prefix := "//" + name
-	if !strings.HasPrefix(comment, prefix) {
+	if !strings.HasPrefix(d.comment, prefix) {
 		return "", false
 	}
-	args := strings.TrimPrefix(comment, prefix)
+	args := strings.TrimPrefix(d.comment, prefix)
 	if args != "" && strings.TrimLeftFunc(args, unicode.IsSpace) == args {
 		return "", false
 	}
 	return args, true
 }
 
-// goGenerateWorkdir recognizes go generate commands that change directory with -C.
-func goGenerateWorkdir(args []string) (string, bool) {
+// generateGoDashC recognizes go generate commands that change directory with -C.
+func (d goDirective) generateGoDashC() (string, bool, error) {
+	if !d.isGenerate() {
+		return "", false, nil
+	}
+	args, err := d.args()
+	if err != nil {
+		return "", false, err
+	}
 	if len(args) == 0 || args[0] != "go" {
-		return "", false
+		return "", false, nil
 	}
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
 		if arg == "-C" {
 			if i+1 >= len(args) {
-				return "", false
+				return "", false, nil
 			}
-			return args[i+1], true
+			return args[i+1], true, nil
 		}
 		if dir, ok := strings.CutPrefix(arg, "-C="); ok {
-			return dir, true
+			return dir, true, nil
 		}
 		if !strings.HasPrefix(arg, "-") {
-			return "", false
+			return "", false, nil
 		}
 	}
-	return "", false
+	return "", false, nil
 }
 
 // goModLocalReplaceModulePaths parses local replace directives into module roots.

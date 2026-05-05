@@ -125,7 +125,10 @@ func TestIncludeHelpers(t *testing.T) {
 }
 
 func TestInvalidQuotedDirectiveArg(t *testing.T) {
-	_, err := scanCommentDirective(`//go:test:include "unterminated`, true, false)
+	_, err := (goDirective{
+		position: "test.go:1:1",
+		comment:  `//go:test:include "unterminated`,
+	}).includes(true, false, false)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -152,11 +155,12 @@ func TestNonDirectiveCommentsAreIgnored(t *testing.T) {
 		"/* go:test:include assets */",
 	}
 	for _, test := range tests {
-		got, err := scanCommentDirective(test, true, false)
+		directive := goDirective{comment: test}
+		got, err := directive.includes(true, false, false)
 		if err != nil {
 			t.Fatalf("%q: %v", test, err)
 		}
-		if len(got.includes) != 0 || len(got.modules) != 0 {
+		if len(got) != 0 || directive.isGenerateGoDashC() {
 			t.Fatalf("%q: got includes %#v", test, got)
 		}
 	}
