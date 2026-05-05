@@ -91,16 +91,16 @@ func main() {
 	}
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [/DIR]")
-}
-
 // run parses CLI flags and emits include patterns for an absolute workspace path.
 func run(ctx context.Context, args []string) (includes []string, rerr error) {
 	ctx, span := telemetry.Tracer(ctx, "go-includes").Start(ctx, "go-includes")
 	defer telemetry.EndWithCause(span, &rerr)
 
-	flags := newFlags()
+	flags := flag.NewFlagSet("go-includes", flag.ExitOnError)
+	flags.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [/DIR]")
+		flags.PrintDefaults()
+	}
 	lint := flags.Bool("lint", false, "include lint inputs")
 	test := flags.Bool("test", false, "include test inputs")
 	generate := flags.Bool("generate", false, "include generate inputs")
@@ -123,23 +123,13 @@ func run(ctx context.Context, args []string) (includes []string, rerr error) {
 	if err != nil {
 		return nil, err
 	}
-	includes, rerr = moduleIncludes(ctx, ws, modulePathClean, mode)
+	includes, rerr = walkIncludes(ctx, ws, modulePathClean, mode)
 	span.SetAttributes(
 		attribute.String("go_includes.module_path", modulePathClean),
 		attribute.String("go_includes.mode", mode.String()),
 		attribute.Int("go_includes.include_count", len(includes)),
 	)
 	return includes, rerr
-}
-
-// newFlags builds the helper's isolated flag set.
-func newFlags() *flag.FlagSet {
-	flags := flag.NewFlagSet("go-includes", flag.ExitOnError)
-	flags.Usage = func() {
-		usage()
-		flags.PrintDefaults()
-	}
-	return flags
 }
 
 // workspaceDirectory returns a workspace-root directory filtered by include globs.
@@ -167,39 +157,11 @@ func readRegularFile(ctx context.Context, dir *dagger.Directory, filePath string
 	return []byte(contents), nil
 }
 
-// moduleIncludes computes extra include patterns reachable from a module.
-func moduleIncludes(ctx context.Context, ws *dagger.Workspace, modulePath string, mode includeModes) ([]string, error) {
-	walker, err := newIncludeWalker(ctx, ws, modulePath, mode)
+// walkIncludes traverses module roots discovered from replaces and generate workdirs.
+func walkIncludes(ctx context.Context, ws *dagger.Workspace, initial string, mode includeModes) ([]string, error) {
+	modulePaths, moduleSet, err := moduleIndex(ctx, ws)
 	if err != nil {
 		return nil, err
-	}
-	return walker.walk(ctx)
-}
-
-// includeWalker traverses module roots discovered from replaces and generate workdirs.
-type includeWalker struct {
-	ws          *dagger.Workspace
-	mode        includeModes
-	initial     string
-	modulePaths []string
-	moduleSet   map[string]bool
-	queued      map[string]bool
-	queue       []string
-	includes    *includeSet
-}
-
-// newIncludeWalker indexes workspace go.mod files and resolves the initial path upward.
-func newIncludeWalker(ctx context.Context, ws *dagger.Workspace, initial string, mode includeModes) (*includeWalker, error) {
-	goMods, err := goModPaths(ctx, ws)
-	if err != nil {
-		return nil, err
-	}
-	modulePaths := make([]string, 0, len(goMods))
-	moduleSet := map[string]bool{}
-	for _, goModPath := range goMods {
-		modulePath := modulePathForGoMod(goModPath)
-		modulePaths = append(modulePaths, modulePath)
-		moduleSet[modulePath] = true
 	}
 
 	initialClean := cleanWorkspacePath(initial)
@@ -208,65 +170,49 @@ func newIncludeWalker(ctx context.Context, ws *dagger.Workspace, initial string,
 		return nil, fmt.Errorf("no go.mod found containing path: %s", initialClean)
 	}
 
-	walker := &includeWalker{
-		ws:          ws,
-		mode:        mode,
-		initial:     initialModule,
-		modulePaths: modulePaths,
-		moduleSet:   moduleSet,
-		queued:      map[string]bool{},
-		includes:    newIncludeSet(),
-	}
-	if err := walker.enqueue(walker.initial); err != nil {
-		return nil, err
-	}
-	return walker, nil
-}
-
-// enqueue adds a module root to the traversal queue once.
-func (w *includeWalker) enqueue(modulePath string) error {
-	modulePath = cleanWorkspacePath(modulePath)
-	if escapesWorkspace(modulePath) {
-		return fmt.Errorf("module path escapes workspace: %s", modulePath)
-	}
-	if !w.moduleSet[modulePath] {
-		return fmt.Errorf("no go.mod found for module root: %s", modulePath)
-	}
-	if w.queued[modulePath] {
+	queued := map[string]bool{initialModule: true}
+	queue := []string{initialModule}
+	includes := newIncludeSet()
+	enqueue := func(modulePath string) error {
+		modulePath = cleanWorkspacePath(modulePath)
+		if escapesWorkspace(modulePath) {
+			return fmt.Errorf("module path escapes workspace: %s", modulePath)
+		}
+		if !moduleSet[modulePath] {
+			return fmt.Errorf("no go.mod found for module root: %s", modulePath)
+		}
+		if !queued[modulePath] {
+			queued[modulePath] = true
+			queue = append(queue, modulePath)
+		}
 		return nil
 	}
-	w.queued[modulePath] = true
-	w.queue = append(w.queue, modulePath)
-	return nil
-}
 
-// walk drains the module queue and accumulates extra include patterns.
-func (w *includeWalker) walk(ctx context.Context) ([]string, error) {
-	for len(w.queue) > 0 {
-		modulePath := w.queue[0]
-		w.queue = w.queue[1:]
+	for len(queue) > 0 {
+		modulePath := queue[0]
+		queue = queue[1:]
 
-		if modulePath != w.initial {
-			w.includes.add(baseIncludes(modulePath)...)
+		if modulePath != initialModule {
+			includes.add(baseIncludes(modulePath)...)
 		}
 
-		scan, err := directiveIncludes(ctx, w.ws, modulePath, w.mode, w.modulePaths, w.moduleSet)
+		scan, err := directiveIncludes(ctx, ws, modulePath, mode, modulePaths, moduleSet)
 		if err != nil {
 			return nil, err
 		}
-		w.includes.add(scan.includes...)
+		includes.add(scan.includes...)
 
-		replaces, err := goModLocalReplaceModules(ctx, w.ws, modulePath)
+		replaces, err := goModLocalReplaceModules(ctx, ws, modulePath)
 		if err != nil {
 			return nil, err
 		}
 		for _, next := range append(replaces, scan.modules...) {
-			if err := w.enqueue(next); err != nil {
+			if err := enqueue(next); err != nil {
 				return nil, err
 			}
 		}
 	}
-	return w.includes.list, nil
+	return includes.list, nil
 }
 
 // baseIncludes returns the static Go source patterns for a module root.
@@ -359,22 +305,24 @@ func nestedModuleExcludes(modulePaths []string, modulePath string) []string {
 	return excludes
 }
 
-// goModPaths returns every go.mod path visible in the workspace.
-func goModPaths(ctx context.Context, ws *dagger.Workspace) ([]string, error) {
+// moduleIndex returns every module root, plus a set for ancestor lookups.
+func moduleIndex(ctx context.Context, ws *dagger.Workspace) ([]string, map[string]bool, error) {
 	goMods, err := workspaceDirectory(ws, []string{"**/go.mod"}, nil).Glob(ctx, "**/go.mod")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	sort.Strings(goMods)
-	return goMods, nil
-}
-
-// modulePathForGoMod converts a go.mod file path into its module root.
-func modulePathForGoMod(goModPath string) string {
-	if goModPath == "go.mod" {
-		return "."
+	modulePaths := make([]string, 0, len(goMods))
+	moduleSet := map[string]bool{}
+	for _, goModPath := range goMods {
+		modulePath := strings.TrimSuffix(goModPath, "/go.mod")
+		if goModPath == "go.mod" {
+			modulePath = "."
+		}
+		modulePaths = append(modulePaths, modulePath)
+		moduleSet[modulePath] = true
 	}
-	return strings.TrimSuffix(goModPath, "/go.mod")
+	return modulePaths, moduleSet, nil
 }
 
 // containingModuleDir finds the nearest ancestor module root for a workspace path.
