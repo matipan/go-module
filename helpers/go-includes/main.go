@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 
 	"dagger.io/dagger"
 	telemetry "github.com/dagger/otel-go"
@@ -196,7 +195,7 @@ func walkIncludes(ctx context.Context, ws *dagger.Workspace, initial string, mod
 			includes.add(baseIncludes(modulePath)...)
 		}
 
-		scan, err := directiveIncludes(ctx, ws, modulePath, mode, modulePaths, moduleSet)
+		scan, err := scanModuleDirectives(ctx, ws, modulePath, mode, modulePaths, moduleSet)
 		if err != nil {
 			return nil, err
 		}
@@ -235,14 +234,14 @@ func baseIncludes(modulePath string) []string {
 	return patterns
 }
 
-// directiveScan records include patterns and additional module roots from comments.
-type directiveScan struct {
+// discoveredInputs records include patterns and module roots found in directives.
+type discoveredInputs struct {
 	includes []string
 	modules  []string
 }
 
-// directiveIncludes scans Go files in one module, excluding nested modules.
-func directiveIncludes(ctx context.Context, ws *dagger.Workspace, modulePath string, mode includeModes, modulePaths []string, moduleSet map[string]bool) (_ directiveScan, rerr error) {
+// scanModuleDirectives scans Go files in one module, excluding nested modules.
+func scanModuleDirectives(ctx context.Context, ws *dagger.Workspace, modulePath string, mode includeModes, modulePaths []string, moduleSet map[string]bool) (_ discoveredInputs, rerr error) {
 	ctx, span := telemetry.Tracer(ctx, "go-includes").Start(ctx, "go-includes scan directives")
 	defer telemetry.EndWithCause(span, &rerr)
 
@@ -250,7 +249,7 @@ func directiveIncludes(ctx context.Context, ws *dagger.Workspace, modulePath str
 	dir := workspaceDirectory(ws, []string{addIncludePrefix(modulePath, "**/*.go")}, excludes)
 	goFiles, err := dir.Glob(ctx, "**/*.go")
 	if err != nil {
-		return directiveScan{}, err
+		return discoveredInputs{}, err
 	}
 	sort.Strings(goFiles)
 
@@ -262,17 +261,17 @@ func directiveIncludes(ctx context.Context, ws *dagger.Workspace, modulePath str
 			continue
 		}
 		if err != nil {
-			return directiveScan{}, err
+			return discoveredInputs{}, err
 		}
-		fileScan, err := goDirectiveIncludesFromBytes(filePath, data, mode)
+		fileScan, err := scanGoFileDirectives(filePath, data, mode)
 		if err != nil {
-			return directiveScan{}, err
+			return discoveredInputs{}, err
 		}
 		includes.add(fileScan.includes...)
 		for _, workdir := range fileScan.modules {
 			module, ok := containingModuleDir(workdir, moduleSet)
 			if !ok {
-				return directiveScan{}, fmt.Errorf("%s: no Go module found for go -C directory: %s", filePath, workdir)
+				return discoveredInputs{}, fmt.Errorf("%s: no Go module found for go -C directory: %s", filePath, workdir)
 			}
 			modules.add(module)
 		}
@@ -284,7 +283,7 @@ func directiveIncludes(ctx context.Context, ws *dagger.Workspace, modulePath str
 		attribute.Int("go_includes.include_count", len(includes.list)),
 		attribute.Int("go_includes.discovered_module_count", len(modules.list)),
 	)
-	return directiveScan{includes: includes.list, modules: modules.list}, nil
+	return discoveredInputs{includes: includes.list, modules: modules.list}, nil
 }
 
 // nestedModuleExcludes returns globs that keep a scan within one module.
@@ -339,21 +338,26 @@ func containingModuleDir(dir string, moduleSet map[string]bool) (string, bool) {
 	}
 }
 
-// goDirectiveIncludesFromBytes parses one Go file and resolves directive paths.
-func goDirectiveIncludesFromBytes(filePath string, data []byte, mode includeModes) (directiveScan, error) {
+// scanGoFileDirectives parses one Go file and resolves directive paths.
+func scanGoFileDirectives(filePath string, data []byte, mode includeModes) (discoveredInputs, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments)
 	if err != nil {
-		return directiveScan{}, err
+		return discoveredInputs{}, err
 	}
 
-	prefix := includePrefixForGoFile(filePath)
-	scan := directiveScan{}
+	filePath = cleanWorkspacePath(filePath)
+	prefix := path.Dir(filePath)
+	if prefix == "." {
+		prefix = ""
+	}
+
+	scan := discoveredInputs{}
 	for _, group := range file.Comments {
 		for _, comment := range group.List {
-			commentScan, err := includePatternsFromComment(comment.Text, mode)
+			commentScan, err := scanCommentDirective(comment.Text, mode)
 			if err != nil {
-				return directiveScan{}, fmt.Errorf("%s: %w", fset.Position(comment.Slash), err)
+				return discoveredInputs{}, fmt.Errorf("%s: %w", fset.Position(comment.Slash), err)
 			}
 			for _, pattern := range commentScan.includes {
 				scan.includes = append(scan.includes, addIncludePrefix(prefix, pattern))
@@ -366,72 +370,62 @@ func goDirectiveIncludesFromBytes(filePath string, data []byte, mode includeMode
 	return scan, nil
 }
 
-// includePrefixForGoFile returns the workspace directory containing a Go file.
-func includePrefixForGoFile(filePath string) string {
-	filePath = cleanWorkspacePath(filePath)
-	fileDir := path.Dir(filePath)
-	if fileDir == "." {
-		return ""
-	}
-	return fileDir
-}
-
-// includePatternsFromComment extracts supported include directives from one comment.
-func includePatternsFromComment(comment string, mode includeModes) (directiveScan, error) {
-	if args, ok := directiveArgs(comment, "go:embed"); ok {
+// scanCommentDirective extracts supported include directives from one comment.
+func scanCommentDirective(comment string, mode includeModes) (discoveredInputs, error) {
+	if args, ok := directiveArguments(comment, "go:embed"); ok {
 		patterns, err := parseDirectiveArgs("go:embed", args)
 		if err != nil {
-			return directiveScan{}, err
+			return discoveredInputs{}, err
 		}
 		for i, pattern := range patterns {
 			patterns[i] = strings.TrimPrefix(pattern, "all:")
 		}
-		return directiveScan{includes: patterns}, nil
+		return discoveredInputs{includes: patterns}, nil
 	}
 
 	if mode.test {
-		if args, ok := directiveArgs(comment, "go:test:include"); ok {
+		if args, ok := directiveArguments(comment, "go:test:include"); ok {
 			patterns, err := parseDirectiveArgs("go:test:include", args)
 			if err != nil {
-				return directiveScan{}, err
+				return discoveredInputs{}, err
 			}
-			return directiveScan{includes: patterns}, nil
+			return discoveredInputs{includes: patterns}, nil
 		}
 	}
 
 	if mode.generate {
-		if args, ok := directiveArgs(comment, "go:generate:include"); ok {
+		if args, ok := directiveArguments(comment, "go:generate:include"); ok {
 			patterns, err := parseDirectiveArgs("go:generate:include", args)
 			if err != nil {
-				return directiveScan{}, err
+				return discoveredInputs{}, err
 			}
-			return directiveScan{includes: patterns}, nil
+			return discoveredInputs{includes: patterns}, nil
 		}
 
-		args, ok := directiveArgs(comment, "go:generate")
+		args, ok := directiveArguments(comment, "go:generate")
 		if !ok {
-			return directiveScan{}, nil
+			return discoveredInputs{}, nil
 		}
 		parsed, err := parseDirectiveArgs("go:generate", args)
 		if err != nil {
-			return directiveScan{}, err
+			return discoveredInputs{}, err
 		}
 		if workdir, ok := goGenerateWorkdir(parsed); ok {
-			return directiveScan{modules: []string{workdir}}, nil
+			return discoveredInputs{modules: []string{workdir}}, nil
 		}
 	}
 
-	return directiveScan{}, nil
+	return discoveredInputs{}, nil
 }
 
-// directiveArgs returns the argument tail for an exact line directive name.
-func directiveArgs(comment, name string) (string, bool) {
+// directiveArguments returns the argument tail for an exact line directive name.
+func directiveArguments(comment, name string) (string, bool) {
 	prefix := "//" + name
 	if !strings.HasPrefix(comment, prefix) {
 		return "", false
 	}
 	args := strings.TrimPrefix(comment, prefix)
-	if args != "" && !startsWithSpace(args) {
+	if args != "" && strings.TrimLeftFunc(args, unicode.IsSpace) == args {
 		return "", false
 	}
 	return args, true
@@ -509,7 +503,7 @@ func parseDirectiveArgs(name, args string) ([]string, error) {
 			}
 			parsed = append(parsed, arg)
 			args = args[len(quoted):]
-			if args != "" && !startsWithSpace(args) {
+			if args != "" && strings.TrimLeftFunc(args, unicode.IsSpace) == args {
 				return nil, fmt.Errorf("invalid quoted string in //%s: %s", name, args)
 			}
 		default:
@@ -522,12 +516,6 @@ func parseDirectiveArgs(name, args string) ([]string, error) {
 		}
 	}
 	return parsed, nil
-}
-
-// startsWithSpace reports whether a string begins with Unicode whitespace.
-func startsWithSpace(s string) bool {
-	r, _ := utf8.DecodeRuneInString(s)
-	return unicode.IsSpace(r)
 }
 
 // isWorkspaceRelativePath reports whether a go.mod path can point inside the workspace.

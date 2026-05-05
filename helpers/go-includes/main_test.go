@@ -18,11 +18,11 @@ import "embed"
 var embedded embed.FS
 `)
 
-	gotLint, err := goDirectiveIncludesFromBytes("pkg/includes_test.go", data, modeLint)
+	gotLint, err := scanGoFileDirectives("pkg/includes_test.go", data, modeLint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantLint := directiveScan{
+	wantLint := discoveredInputs{
 		includes: []string{
 			"pkg/assets/*.tmpl",
 			"pkg/hidden",
@@ -32,11 +32,11 @@ var embedded embed.FS
 		t.Fatalf("lint includes mismatch:\n got: %#v\nwant: %#v", gotLint, wantLint)
 	}
 
-	gotTest, err := goDirectiveIncludesFromBytes("pkg/includes_test.go", data, modeTest)
+	gotTest, err := scanGoFileDirectives("pkg/includes_test.go", data, modeTest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantTest := directiveScan{
+	wantTest := discoveredInputs{
 		includes: []string{
 			"pkg/local.txt",
 			"pkg/../shared file.txt",
@@ -49,11 +49,11 @@ var embedded embed.FS
 		t.Fatalf("test includes mismatch:\n got: %#v\nwant: %#v", gotTest, wantTest)
 	}
 
-	gotGenerate, err := goDirectiveIncludesFromBytes("pkg/includes_test.go", data, modeGenerate)
+	gotGenerate, err := scanGoFileDirectives("pkg/includes_test.go", data, modeGenerate)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantGenerate := directiveScan{
+	wantGenerate := discoveredInputs{
 		includes: []string{
 			"pkg/generator.txt",
 			"pkg/assets/*.tmpl",
@@ -65,11 +65,11 @@ var embedded embed.FS
 		t.Fatalf("generate includes mismatch:\n got: %#v\nwant: %#v", gotGenerate, wantGenerate)
 	}
 
-	gotCombined, err := goDirectiveIncludesFromBytes("pkg/includes_test.go", data, includeModesFromFlags(false, true, true))
+	gotCombined, err := scanGoFileDirectives("pkg/includes_test.go", data, includeModesFromFlags(false, true, true))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantCombined := directiveScan{
+	wantCombined := discoveredInputs{
 		includes: []string{
 			"pkg/local.txt",
 			"pkg/../shared file.txt",
@@ -111,9 +111,6 @@ func TestIncludeHelpers(t *testing.T) {
 	if got := includeModesFromFlags(false, false, false); !reflect.DeepEqual(got, modeTest) {
 		t.Fatalf("default include mode got %#v, want %#v", got, modeTest)
 	}
-	if got := includePrefixForGoFile("/pkg/nested/file.go"); got != "pkg/nested" {
-		t.Fatalf("includePrefixForGoFile got %q", got)
-	}
 	if got := addIncludePrefix("pkg", "/from-root.txt"); got != "from-root.txt" {
 		t.Fatalf("absolute include got %q", got)
 	}
@@ -134,7 +131,7 @@ func TestIncludeHelpers(t *testing.T) {
 }
 
 func TestInvalidQuotedDirectiveArg(t *testing.T) {
-	_, err := includePatternsFromComment(`//go:test:include "unterminated`, modeTest)
+	_, err := scanCommentDirective(`//go:test:include "unterminated`, modeTest)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -161,7 +158,7 @@ func TestNonDirectiveCommentsAreIgnored(t *testing.T) {
 		"/* go:test:include assets */",
 	}
 	for _, test := range tests {
-		got, err := includePatternsFromComment(test, modeTest)
+		got, err := scanCommentDirective(test, modeTest)
 		if err != nil {
 			t.Fatalf("%q: %v", test, err)
 		}
