@@ -108,7 +108,7 @@ replace example.com/versioned => example.com/versioned v1.2.3
 }
 
 func TestIncludeHelpers(t *testing.T) {
-	if got := (target{test: true}).modeString(); got != "test" {
+	if got := (targetModule{test: true}).modeString(); got != "test" {
 		t.Fatalf("modeString got %q, want test", got)
 	}
 	if got := addIncludePrefix("pkg", "/from-root.txt"); got != "from-root.txt" {
@@ -135,7 +135,7 @@ func TestInvalidQuotedDirectiveArg(t *testing.T) {
 }
 
 func TestRelativeCLIPathRejected(t *testing.T) {
-	_, err := newTarget(t.Context(), []string{"relative/module"})
+	_, err := newTargetModuleFromArgs(t.Context(), []string{"relative/module"})
 	if err == nil {
 		t.Fatal("expected error")
 	}

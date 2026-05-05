@@ -32,19 +32,19 @@ func main() {
 	ctx := telemetry.Init(context.Background(), telemetry.Config{Detect: true})
 	defer telemetry.Close()
 
-	target, err := newTarget(ctx, os.Args[1:])
+	targetModule, err := newTargetModuleFromArgs(ctx, os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := target.print(ctx, os.Stdout); err != nil {
+	if err := targetModule.print(ctx, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-// newTarget parses CLI flags and resolves the requested workspace module.
-func newTarget(ctx context.Context, cliArgs []string) (*target, error) {
+// newTargetModuleFromArgs parses CLI flags and resolves the requested module.
+func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModule, error) {
 	flags := flag.NewFlagSet("go-includes", flag.ExitOnError)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [/DIR]")
@@ -78,12 +78,24 @@ func newTarget(ctx context.Context, cliArgs []string) (*target, error) {
 	if !ok {
 		return nil, fmt.Errorf("no go.mod found containing path: %s", modulePathClean)
 	}
-	return &target{
+	return newTargetModule(ws, moduleRoot, *lint, *test, *generate)
+}
+
+// newTargetModule builds one target module with shared workspace and modes.
+func newTargetModule(ws *workspace, moduleRoot string, lint, test, generate bool) (*targetModule, error) {
+	moduleRoot = cleanWorkspacePath(moduleRoot)
+	if escapesWorkspace(moduleRoot) {
+		return nil, fmt.Errorf("module path escapes workspace: %s", moduleRoot)
+	}
+	if !ws.moduleSet[moduleRoot] {
+		return nil, fmt.Errorf("no go.mod found for module root: %s", moduleRoot)
+	}
+	return &targetModule{
 		workspace:  ws,
 		moduleRoot: moduleRoot,
-		lint:       *lint,
-		test:       *test,
-		generate:   *generate,
+		lint:       lint,
+		test:       test,
+		generate:   generate,
 	}, nil
 }
 
@@ -93,7 +105,7 @@ func Tracer(ctx context.Context) trace.Tracer {
 }
 
 // modeString returns a compact operation label for trace attributes.
-func (t target) modeString() string {
+func (t targetModule) modeString() string {
 	var names []string
 	if t.lint {
 		names = append(names, "lint")
@@ -202,8 +214,8 @@ func (w *workspace) localReplaceModules(ctx context.Context, moduleRoot string) 
 	return goModLocalReplaceModulePaths(goModPath, data)
 }
 
-// target is the requested module root and operation-specific include behavior.
-type target struct {
+// targetModule is one module root and operation-specific include behavior.
+type targetModule struct {
 	workspace  *workspace
 	moduleRoot string
 	lint       bool
@@ -212,51 +224,51 @@ type target struct {
 }
 
 // includes traverses module roots discovered from replaces and generate workdirs.
-func (t target) includes(ctx context.Context) ([]string, error) {
+func (t targetModule) includes(ctx context.Context) ([]string, error) {
 	initialModule := t.moduleRoot
 
+	// Walk the initial module plus module roots discovered from replaces and directives.
 	queued := map[string]bool{initialModule: true}
 	queue := []string{initialModule}
 	var includes []string
-	enqueue := func(modulePath string) error {
-		modulePath = cleanWorkspacePath(modulePath)
-		if escapesWorkspace(modulePath) {
-			return fmt.Errorf("module path escapes workspace: %s", modulePath)
-		}
-		if !t.workspace.moduleSet[modulePath] {
-			return fmt.Errorf("no go.mod found for module root: %s", modulePath)
-		}
-		if !queued[modulePath] {
-			queued[modulePath] = true
-			queue = append(queue, modulePath)
-		}
-		return nil
-	}
 
 	for len(queue) > 0 {
-		modulePath := queue[0]
+		moduleRoot := queue[0]
 		queue = queue[1:]
+		module, err := newTargetModule(t.workspace, moduleRoot, t.lint, t.test, t.generate)
+		if err != nil {
+			return nil, err
+		}
+		moduleRoot = module.moduleRoot
 
-		if modulePath != initialModule {
-			includes = append(includes, baseIncludes(modulePath)...)
+		if moduleRoot != initialModule {
+			includes = append(includes, baseIncludes(moduleRoot)...)
 		}
 
-		scan, err := t.scanModuleDirectives(ctx, modulePath)
+		// Directives may add include patterns and may point at other modules.
+		scan, err := module.scanModuleDirectives(ctx)
 		if err != nil {
 			return nil, err
 		}
 		includes = append(includes, scan.includes...)
 
-		replaces, err := t.workspace.localReplaceModules(ctx, modulePath)
+		replaces, err := module.workspace.localReplaceModules(ctx, module.moduleRoot)
 		if err != nil {
 			return nil, err
 		}
+		// Local replaces and go:generate -C targets join the same module queue.
 		for _, next := range append(replaces, scan.modules...) {
-			if err := enqueue(next); err != nil {
+			nextModule, err := newTargetModule(t.workspace, next, t.lint, t.test, t.generate)
+			if err != nil {
 				return nil, err
+			}
+			if !queued[nextModule.moduleRoot] {
+				queued[nextModule.moduleRoot] = true
+				queue = append(queue, nextModule.moduleRoot)
 			}
 		}
 	}
+	// Preserve first-seen order while removing duplicate patterns.
 	deduped := make([]string, 0, len(includes))
 	seen := map[string]bool{}
 	for _, include := range includes {
@@ -270,7 +282,7 @@ func (t target) includes(ctx context.Context) ([]string, error) {
 }
 
 // print writes the target include patterns, one per line.
-func (t target) print(ctx context.Context, w io.Writer) error {
+func (t targetModule) print(ctx context.Context, w io.Writer) error {
 	includes, err := t.includes(ctx)
 	if err != nil {
 		return err
@@ -327,22 +339,21 @@ type discoveredInputs struct {
 }
 
 // scanModuleDirectives scans Go directives in one module.
-func (t target) scanModuleDirectives(ctx context.Context, modulePath string) (_ discoveredInputs, rerr error) {
+func (t targetModule) scanModuleDirectives(ctx context.Context) (_ discoveredInputs, rerr error) {
 	ctx, span := Tracer(ctx).Start(ctx, "go-includes scan directives")
 	defer telemetry.EndWithCause(span, &rerr)
 
-	directives, goFileCount, err := t.goDirectives(ctx, modulePath)
+	directives, err := t.goDirectives(ctx)
 	if err != nil {
 		return discoveredInputs{}, err
 	}
-	scan, err := t.includesFromGoDirectives(directives)
+	scan, err := t.inputsFromGoDirectives(directives)
 	if err != nil {
 		return discoveredInputs{}, err
 	}
 	span.SetAttributes(
 		attribute.String("go_includes.mode", t.modeString()),
-		attribute.String("go_includes.module_path", modulePath),
-		attribute.Int("go_includes.file_count", goFileCount),
+		attribute.String("go_includes.module_path", t.moduleRoot),
 		attribute.Int("go_includes.include_count", len(scan.includes)),
 		attribute.Int("go_includes.discovered_module_count", len(scan.modules)),
 	)
@@ -350,12 +361,12 @@ func (t target) scanModuleDirectives(ctx context.Context, modulePath string) (_ 
 }
 
 // goDirectives returns parsed Go comment directives for one module.
-func (t target) goDirectives(ctx context.Context, modulePath string) ([]goDirective, int, error) {
-	excludes := t.workspace.nestedModuleExcludes(modulePath)
-	dir := t.workspace.directory([]string{addIncludePrefix(modulePath, "**/*.go")}, excludes)
+func (t targetModule) goDirectives(ctx context.Context) ([]goDirective, error) {
+	excludes := t.workspace.nestedModuleExcludes(t.moduleRoot)
+	dir := t.workspace.directory([]string{addIncludePrefix(t.moduleRoot, "**/*.go")}, excludes)
 	goFiles, err := dir.Glob(ctx, "**/*.go")
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	sort.Strings(goFiles)
 
@@ -366,19 +377,19 @@ func (t target) goDirectives(ctx context.Context, modulePath string) ([]goDirect
 			continue
 		}
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		fileDirectives, err := goDirectivesInFile(filePath, data)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		directives = append(directives, fileDirectives...)
 	}
-	return directives, len(goFiles), nil
+	return directives, nil
 }
 
-// includesFromGoDirectives resolves directive inputs for the target mode.
-func (t target) includesFromGoDirectives(directives []goDirective) (discoveredInputs, error) {
+// inputsFromGoDirectives resolves already-collected directives for the target mode.
+func (t targetModule) inputsFromGoDirectives(directives []goDirective) (discoveredInputs, error) {
 	var scan discoveredInputs
 	for _, directive := range directives {
 		includes, err := directive.includes(t.test, t.lint, t.generate)
@@ -416,7 +427,7 @@ func scanGoFileDirectives(filePath string, data []byte, test, generate bool) (di
 	if err != nil {
 		return discoveredInputs{}, err
 	}
-	return (target{test: test, generate: generate}).includesFromGoDirectives(directives)
+	return (targetModule{test: test, generate: generate}).inputsFromGoDirectives(directives)
 }
 
 // goDirectivesInFile extracts Go comment directives from one parsed Go file.
