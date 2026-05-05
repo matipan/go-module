@@ -18,70 +18,74 @@ import "embed"
 var embedded embed.FS
 `)
 
-	gotLint, err := scanGoFileDirectives("pkg/includes_test.go", data, false, false)
+	gotLintIncludes, gotLintModules, err := scanGoFileDirectives("pkg/includes_test.go", data, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantLint := discoveredInputs{
-		includes: []string{
-			"pkg/assets/*.tmpl",
-			"pkg/hidden",
-		},
+	wantLintIncludes := []string{
+		"pkg/assets/*.tmpl",
+		"pkg/hidden",
 	}
-	if !reflect.DeepEqual(gotLint, wantLint) {
-		t.Fatalf("lint includes mismatch:\n got: %#v\nwant: %#v", gotLint, wantLint)
+	if !reflect.DeepEqual(gotLintIncludes, wantLintIncludes) {
+		t.Fatalf("lint includes mismatch:\n got: %#v\nwant: %#v", gotLintIncludes, wantLintIncludes)
+	}
+	if len(gotLintModules) != 0 {
+		t.Fatalf("lint modules got %#v, want none", gotLintModules)
 	}
 
-	gotTest, err := scanGoFileDirectives("pkg/includes_test.go", data, true, false)
+	gotTestIncludes, gotTestModules, err := scanGoFileDirectives("pkg/includes_test.go", data, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantTest := discoveredInputs{
-		includes: []string{
-			"pkg/local.txt",
-			"pkg/../shared file.txt",
-			"pkg/raw path.txt",
-			"pkg/assets/*.tmpl",
-			"pkg/hidden",
-		},
+	wantTestIncludes := []string{
+		"pkg/local.txt",
+		"shared file.txt",
+		"pkg/raw path.txt",
+		"pkg/assets/*.tmpl",
+		"pkg/hidden",
 	}
-	if !reflect.DeepEqual(gotTest, wantTest) {
-		t.Fatalf("test includes mismatch:\n got: %#v\nwant: %#v", gotTest, wantTest)
+	if !reflect.DeepEqual(gotTestIncludes, wantTestIncludes) {
+		t.Fatalf("test includes mismatch:\n got: %#v\nwant: %#v", gotTestIncludes, wantTestIncludes)
+	}
+	if len(gotTestModules) != 0 {
+		t.Fatalf("test modules got %#v, want none", gotTestModules)
 	}
 
-	gotGenerate, err := scanGoFileDirectives("pkg/includes_test.go", data, false, true)
+	gotGenerateIncludes, gotGenerateModules, err := scanGoFileDirectives("pkg/includes_test.go", data, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantGenerate := discoveredInputs{
-		includes: []string{
-			"pkg/generator.txt",
-			"pkg/assets/*.tmpl",
-			"pkg/hidden",
-		},
-		modules: []string{"."},
+	wantGenerateIncludes := []string{
+		"pkg/generator.txt",
+		"pkg/assets/*.tmpl",
+		"pkg/hidden",
 	}
-	if !reflect.DeepEqual(gotGenerate, wantGenerate) {
-		t.Fatalf("generate includes mismatch:\n got: %#v\nwant: %#v", gotGenerate, wantGenerate)
+	wantGenerateModules := []string{"."}
+	if !reflect.DeepEqual(gotGenerateIncludes, wantGenerateIncludes) {
+		t.Fatalf("generate includes mismatch:\n got: %#v\nwant: %#v", gotGenerateIncludes, wantGenerateIncludes)
+	}
+	if !reflect.DeepEqual(gotGenerateModules, wantGenerateModules) {
+		t.Fatalf("generate modules mismatch:\n got: %#v\nwant: %#v", gotGenerateModules, wantGenerateModules)
 	}
 
-	gotCombined, err := scanGoFileDirectives("pkg/includes_test.go", data, true, true)
+	gotCombinedIncludes, gotCombinedModules, err := scanGoFileDirectives("pkg/includes_test.go", data, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantCombined := discoveredInputs{
-		includes: []string{
-			"pkg/local.txt",
-			"pkg/../shared file.txt",
-			"pkg/raw path.txt",
-			"pkg/generator.txt",
-			"pkg/assets/*.tmpl",
-			"pkg/hidden",
-		},
-		modules: []string{"."},
+	wantCombinedIncludes := []string{
+		"pkg/local.txt",
+		"shared file.txt",
+		"pkg/raw path.txt",
+		"pkg/generator.txt",
+		"pkg/assets/*.tmpl",
+		"pkg/hidden",
 	}
-	if !reflect.DeepEqual(gotCombined, wantCombined) {
-		t.Fatalf("combined includes mismatch:\n got: %#v\nwant: %#v", gotCombined, wantCombined)
+	wantCombinedModules := []string{"."}
+	if !reflect.DeepEqual(gotCombinedIncludes, wantCombinedIncludes) {
+		t.Fatalf("combined includes mismatch:\n got: %#v\nwant: %#v", gotCombinedIncludes, wantCombinedIncludes)
+	}
+	if !reflect.DeepEqual(gotCombinedModules, wantCombinedModules) {
+		t.Fatalf("combined modules mismatch:\n got: %#v\nwant: %#v", gotCombinedModules, wantCombinedModules)
 	}
 }
 
@@ -108,12 +112,6 @@ replace example.com/versioned => example.com/versioned v1.2.3
 }
 
 func TestIncludeHelpers(t *testing.T) {
-	if got := (targetModule{test: true}).modeString(); got != "test" {
-		t.Fatalf("modeString got %q, want test", got)
-	}
-	if got := addIncludePrefix("pkg", "/from-root.txt"); got != "from-root.txt" {
-		t.Fatalf("absolute include got %q", got)
-	}
 	ws := &workspace{moduleSet: map[string]bool{
 		".":       true,
 		"pkg/mod": true,
@@ -128,7 +126,7 @@ func TestInvalidQuotedDirectiveArg(t *testing.T) {
 	_, err := (goDirective{
 		position: "test.go:1:1",
 		comment:  `//go:test:include "unterminated`,
-	}).includes(true, false, false)
+	}).includePatterns()
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -156,9 +154,13 @@ func TestNonDirectiveCommentsAreIgnored(t *testing.T) {
 	}
 	for _, test := range tests {
 		directive := goDirective{comment: test}
-		got, err := directive.includes(true, false, false)
-		if err != nil {
-			t.Fatalf("%q: %v", test, err)
+		var got []string
+		if directive.isEmbed() || directive.isTestInclude() {
+			var err error
+			got, err = directive.includePatterns()
+			if err != nil {
+				t.Fatalf("%q: %v", test, err)
+			}
 		}
 		if len(got) != 0 || directive.isGenerateGoDashC() {
 			t.Fatalf("%q: got includes %#v", test, got)

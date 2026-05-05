@@ -213,7 +213,7 @@ type E2e {
     assert(
       containsPath(
         includedGoModIncludes,
-        "fixtures/go-module-with-included-gomod-replace/sdk/go/../../cmd/codegen/**",
+        "fixtures/go-module-with-included-gomod-replace/cmd/codegen/**",
       ),
       "go:generate scoped include did not include generator support files",
     )

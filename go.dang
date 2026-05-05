@@ -325,7 +325,7 @@ type GoModule {
     test: Boolean! = false,
     generate: Boolean! = false,
   ): [String!]! {
-    includeBase + includeExtraFiles + includeDiscovered(ws, lint: lint, test: test, generate: generate)
+    includeExtraFiles + includeDiscovered(ws, lint: lint, test: test, generate: generate)
   }
 
   """
