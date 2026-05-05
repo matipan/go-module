@@ -188,6 +188,13 @@ type GoModule {
   }
 
   """
+  Absolute workspace path for this module root.
+  """
+  let workspacePath: String! {
+    if (path == ".") { "/" } else { "/" + path.trimSuffix("/") }
+  }
+
+  """
   Base container for the Go include helper.
   """
   let goIncludesHelper(ws: Workspace!): Container! {
@@ -199,6 +206,8 @@ type GoModule {
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
       .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
       .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+      .withDirectory("/ws", directory)
+      .withWorkdir("/ws")
       .withEnvVariable("DAGGER_GO_WORKSPACE_ID", toJSON(ws.id))
   }
 
@@ -270,7 +279,7 @@ type GoModule {
   ): [String!]! {
     goIncludesHelper(ws)
       .withExec(
-        ["go-includes"] + includeFlags(lint, test, generate) + [path],
+        ["go-includes"] + includeFlags(lint, test, generate) + [workspacePath],
         experimentalPrivilegedNesting: true,
       )
       .stdout

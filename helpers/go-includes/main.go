@@ -90,7 +90,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [DIR]")
+	fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [/DIR]")
 }
 
 func run(ctx context.Context, args []string) (includes []string, rerr error) {
@@ -108,16 +108,18 @@ func run(ctx context.Context, args []string) (includes []string, rerr error) {
 		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	mode := includeModesFromFlags(*lint, *test, *generate)
+	modulePath := "/"
+	if flags.NArg() == 1 {
+		modulePath = flags.Arg(0)
+		if !strings.HasPrefix(modulePath, "/") {
+			return nil, fmt.Errorf("workspace path must be absolute: %s", modulePath)
+		}
+	}
+	modulePathClean := cleanWorkspacePath(modulePath)
 	ws, err := currentWorkspace(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	modulePath := "."
-	if flags.NArg() == 1 {
-		modulePath = flags.Arg(0)
-	}
-	modulePathClean := cleanWorkspacePath(modulePath)
 	includes, rerr = moduleIncludes(ctx, ws, modulePathClean, mode)
 	span.SetAttributes(
 		attribute.String("go_includes.module_path", modulePathClean),

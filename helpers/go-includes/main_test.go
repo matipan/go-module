@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -136,6 +137,16 @@ func TestInvalidQuotedDirectiveArg(t *testing.T) {
 	_, err := includePatternsFromComment(`//go:test:include "unterminated`, modeTest)
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestRelativeCLIPathRejected(t *testing.T) {
+	_, err := run(t.Context(), []string{"relative/module"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "workspace path must be absolute: relative/module") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
