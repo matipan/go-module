@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"path"
 	"sort"
@@ -27,74 +28,23 @@ var errNotRegularFile = errors.New("not a regular file")
 
 const instrumentationLibrary = "go-includes"
 
-// Tracer returns the helper's telemetry tracer.
-func Tracer(ctx context.Context) trace.Tracer {
-	return telemetry.Tracer(ctx, instrumentationLibrary)
-}
-
-// includeModes selects the operation-specific directive families to honor.
-type includeModes struct {
-	lint     bool
-	test     bool
-	generate bool
-}
-
-var (
-	modeLint     = includeModes{lint: true}
-	modeTest     = includeModes{test: true}
-	modeGenerate = includeModes{generate: true}
-)
-
-// includeModesFromFlags converts CLI mode flags into scan behavior.
-func includeModesFromFlags(lint, test, generate bool) includeModes {
-	if !lint && !test && !generate {
-		test = true
-	}
-	return includeModes{
-		lint:     lint,
-		test:     test,
-		generate: generate,
-	}
-}
-
-// String returns a compact mode label for trace attributes.
-func (m includeModes) String() string {
-	var names []string
-	if m.lint {
-		names = append(names, "lint")
-	}
-	if m.test {
-		names = append(names, "test")
-	}
-	if m.generate {
-		names = append(names, "generate")
-	}
-	if len(names) == 0 {
-		return "test"
-	}
-	return strings.Join(names, ",")
-}
-
 func main() {
 	ctx := telemetry.Init(context.Background(), telemetry.Config{Detect: true})
 	defer telemetry.Close()
 
-	var (
-		lines []string
-		err   error
-	)
-	lines, err = run(ctx, os.Args[1:])
+	target, err := newTarget(ctx, os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	for _, line := range lines {
-		fmt.Println(line)
+	if err := target.print(ctx, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
-// run parses CLI flags and emits include patterns for an absolute workspace path.
-func run(ctx context.Context, args []string) ([]string, error) {
+// newTarget parses CLI flags and resolves the requested workspace module.
+func newTarget(ctx context.Context, cliArgs []string) (*target, error) {
 	flags := flag.NewFlagSet("go-includes", flag.ExitOnError)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [/DIR]")
@@ -103,13 +53,15 @@ func run(ctx context.Context, args []string) ([]string, error) {
 	lint := flags.Bool("lint", false, "include lint inputs")
 	test := flags.Bool("test", false, "include test inputs")
 	generate := flags.Bool("generate", false, "include generate inputs")
-	if err := flags.Parse(args); err != nil {
+	if err := flags.Parse(cliArgs); err != nil {
 		return nil, err
 	}
 	if flags.NArg() > 1 {
 		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	mode := includeModesFromFlags(*lint, *test, *generate)
+	if !*lint && !*test && !*generate {
+		*test = true
+	}
 	modulePath := "/"
 	if flags.NArg() == 1 {
 		modulePath = flags.Arg(0)
@@ -118,50 +70,150 @@ func run(ctx context.Context, args []string) ([]string, error) {
 		}
 	}
 	modulePathClean := cleanWorkspacePath(modulePath)
-	ws, err := currentWorkspace(ctx)
+	ws, err := newWorkspace(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return walkIncludes(ctx, ws, modulePathClean, mode)
+	moduleRoot, ok := ws.containingModuleDir(modulePathClean)
+	if !ok {
+		return nil, fmt.Errorf("no go.mod found containing path: %s", modulePathClean)
+	}
+	return &target{
+		workspace:  ws,
+		moduleRoot: moduleRoot,
+		lint:       *lint,
+		test:       *test,
+		generate:   *generate,
+	}, nil
 }
 
-// workspaceDirectory returns a workspace-root directory filtered by include globs.
-func workspaceDirectory(ws *dagger.Workspace, include, exclude []string) *dagger.Directory {
-	return ws.Directory("/", dagger.WorkspaceDirectoryOpts{
+// Tracer returns the helper's telemetry tracer.
+func Tracer(ctx context.Context) trace.Tracer {
+	return telemetry.Tracer(ctx, instrumentationLibrary)
+}
+
+// modeString returns a compact operation label for trace attributes.
+func (t target) modeString() string {
+	var names []string
+	if t.lint {
+		names = append(names, "lint")
+	}
+	if t.test {
+		names = append(names, "test")
+	}
+	if t.generate {
+		names = append(names, "generate")
+	}
+	if len(names) == 0 {
+		return "test"
+	}
+	return strings.Join(names, ",")
+}
+
+// workspace wraps a Dagger workspace with indexes shared by include targets.
+type workspace struct {
+	*dagger.Workspace
+
+	moduleRoots []string
+	moduleSet   map[string]bool
+}
+
+// newWorkspace loads the current Dagger workspace and indexes its Go modules.
+func newWorkspace(ctx context.Context) (*workspace, error) {
+	dagWS, err := currentWorkspace(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ws := &workspace{Workspace: dagWS}
+	if err := ws.indexModules(ctx); err != nil {
+		return nil, err
+	}
+	return ws, nil
+}
+
+// directory returns a workspace-root directory filtered by include globs.
+func (w *workspace) directory(include, exclude []string) *dagger.Directory {
+	return w.Directory("/", dagger.WorkspaceDirectoryOpts{
 		Include: append([]string(nil), include...),
 		Exclude: append([]string(nil), exclude...),
 	})
 }
 
-// readRegularFile reads a file from a Dagger directory and reports directories distinctly.
-func readRegularFile(ctx context.Context, dir *dagger.Directory, filePath string) ([]byte, error) {
-	cleanPath := cleanWorkspacePath(filePath)
-	if escapesWorkspace(cleanPath) {
-		return nil, fmt.Errorf("path escapes workspace: %s", filePath)
-	}
-	contents, err := dir.File(cleanPath).Contents(ctx)
+// indexModules records every module root, plus a set for ancestor lookups.
+func (w *workspace) indexModules(ctx context.Context) error {
+	goMods, err := w.directory([]string{"**/go.mod"}, nil).Glob(ctx, "**/go.mod")
 	if err != nil {
-		fileType, statErr := dir.Stat(cleanPath).FileType(ctx)
-		if statErr == nil && fileType == dagger.FileTypeDirectory {
-			return nil, errNotRegularFile
-		}
-		return nil, err
+		return err
 	}
-	return []byte(contents), nil
+	sort.Strings(goMods)
+	w.moduleRoots = make([]string, 0, len(goMods))
+	w.moduleSet = map[string]bool{}
+	for _, goModPath := range goMods {
+		moduleRoot := strings.TrimSuffix(goModPath, "/go.mod")
+		if goModPath == "go.mod" {
+			moduleRoot = "."
+		}
+		w.moduleRoots = append(w.moduleRoots, moduleRoot)
+		w.moduleSet[moduleRoot] = true
+	}
+	return nil
 }
 
-// walkIncludes traverses module roots discovered from replaces and generate workdirs.
-func walkIncludes(ctx context.Context, ws *dagger.Workspace, initial string, mode includeModes) ([]string, error) {
-	modulePaths, moduleSet, err := moduleIndex(ctx, ws)
+// containingModuleDir finds the nearest ancestor module root for a workspace path.
+func (w *workspace) containingModuleDir(dir string) (string, bool) {
+	dir = cleanWorkspacePath(dir)
+	for {
+		if w.moduleSet[dir] {
+			return dir, true
+		}
+		if dir == "." {
+			return "", false
+		}
+		dir = path.Dir(dir)
+	}
+}
+
+// nestedModuleExcludes returns globs that keep a scan within one module.
+func (w *workspace) nestedModuleExcludes(moduleRoot string) []string {
+	var excludes []string
+	for _, nestedRoot := range w.moduleRoots {
+		if moduleRoot == "." {
+			if nestedRoot != "." {
+				excludes = append(excludes, nestedRoot+"/**")
+			}
+			continue
+		}
+		if nestedRoot != moduleRoot && strings.HasPrefix(nestedRoot, strings.TrimSuffix(moduleRoot, "/")+"/") {
+			excludes = append(excludes, nestedRoot+"/**")
+		}
+	}
+	sort.Strings(excludes)
+	return excludes
+}
+
+// localReplaceModules returns local replace targets for one module's go.mod.
+func (w *workspace) localReplaceModules(ctx context.Context, moduleRoot string) ([]string, error) {
+	goModPath := addIncludePrefix(moduleRoot, "go.mod")
+	dir := w.directory([]string{goModPath}, nil)
+	data, err := readRegularFile(ctx, dir, goModPath)
 	if err != nil {
 		return nil, err
 	}
+	return goModLocalReplaceModulePaths(goModPath, data)
+}
 
-	initialClean := cleanWorkspacePath(initial)
-	initialModule, ok := containingModuleDir(initialClean, moduleSet)
-	if !ok {
-		return nil, fmt.Errorf("no go.mod found containing path: %s", initialClean)
-	}
+// target is the requested module root and operation-specific include behavior.
+type target struct {
+	workspace  *workspace
+	moduleRoot string
+	lint       bool
+	test       bool
+	generate   bool
+}
+
+// includes traverses module roots discovered from replaces and generate workdirs.
+func (t target) includes(ctx context.Context) ([]string, error) {
+	initialModule := t.moduleRoot
 
 	queued := map[string]bool{initialModule: true}
 	queue := []string{initialModule}
@@ -171,7 +223,7 @@ func walkIncludes(ctx context.Context, ws *dagger.Workspace, initial string, mod
 		if escapesWorkspace(modulePath) {
 			return fmt.Errorf("module path escapes workspace: %s", modulePath)
 		}
-		if !moduleSet[modulePath] {
+		if !t.workspace.moduleSet[modulePath] {
 			return fmt.Errorf("no go.mod found for module root: %s", modulePath)
 		}
 		if !queued[modulePath] {
@@ -189,13 +241,13 @@ func walkIncludes(ctx context.Context, ws *dagger.Workspace, initial string, mod
 			includes.add(baseIncludes(modulePath)...)
 		}
 
-		scan, err := scanModuleDirectives(ctx, ws, modulePath, mode, modulePaths, moduleSet)
+		scan, err := t.scanModuleDirectives(ctx, modulePath)
 		if err != nil {
 			return nil, err
 		}
 		includes.add(scan.includes...)
 
-		replaces, err := goModLocalReplaceModules(ctx, ws, modulePath)
+		replaces, err := t.workspace.localReplaceModules(ctx, modulePath)
 		if err != nil {
 			return nil, err
 		}
@@ -206,6 +258,37 @@ func walkIncludes(ctx context.Context, ws *dagger.Workspace, initial string, mod
 		}
 	}
 	return includes.list, nil
+}
+
+// print writes the target include patterns, one per line.
+func (t target) print(ctx context.Context, w io.Writer) error {
+	includes, err := t.includes(ctx)
+	if err != nil {
+		return err
+	}
+	for _, include := range includes {
+		if _, err := fmt.Fprintln(w, include); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readRegularFile reads a file from a Dagger directory and reports directories distinctly.
+func readRegularFile(ctx context.Context, dir *dagger.Directory, filePath string) ([]byte, error) {
+	cleanPath := cleanWorkspacePath(filePath)
+	if escapesWorkspace(cleanPath) {
+		return nil, fmt.Errorf("path escapes workspace: %s", filePath)
+	}
+	contents, err := dir.File(cleanPath).Contents(ctx)
+	if err != nil {
+		fileType, statErr := dir.Stat(cleanPath).FileType(ctx)
+		if statErr == nil && fileType == dagger.FileTypeDirectory {
+			return nil, errNotRegularFile
+		}
+		return nil, err
+	}
+	return []byte(contents), nil
 }
 
 // baseIncludes returns the static Go source patterns for a module root.
@@ -235,12 +318,12 @@ type discoveredInputs struct {
 }
 
 // scanModuleDirectives scans Go files in one module, excluding nested modules.
-func scanModuleDirectives(ctx context.Context, ws *dagger.Workspace, modulePath string, mode includeModes, modulePaths []string, moduleSet map[string]bool) (_ discoveredInputs, rerr error) {
+func (t target) scanModuleDirectives(ctx context.Context, modulePath string) (_ discoveredInputs, rerr error) {
 	ctx, span := Tracer(ctx).Start(ctx, "go-includes scan directives")
 	defer telemetry.EndWithCause(span, &rerr)
 
-	excludes := nestedModuleExcludes(modulePaths, modulePath)
-	dir := workspaceDirectory(ws, []string{addIncludePrefix(modulePath, "**/*.go")}, excludes)
+	excludes := t.workspace.nestedModuleExcludes(modulePath)
+	dir := t.workspace.directory([]string{addIncludePrefix(modulePath, "**/*.go")}, excludes)
 	goFiles, err := dir.Glob(ctx, "**/*.go")
 	if err != nil {
 		return discoveredInputs{}, err
@@ -257,13 +340,13 @@ func scanModuleDirectives(ctx context.Context, ws *dagger.Workspace, modulePath 
 		if err != nil {
 			return discoveredInputs{}, err
 		}
-		fileScan, err := scanGoFileDirectives(filePath, data, mode)
+		fileScan, err := scanGoFileDirectives(filePath, data, t.test, t.generate)
 		if err != nil {
 			return discoveredInputs{}, err
 		}
 		includes.add(fileScan.includes...)
 		for _, workdir := range fileScan.modules {
-			module, ok := containingModuleDir(workdir, moduleSet)
+			module, ok := t.workspace.containingModuleDir(workdir)
 			if !ok {
 				return discoveredInputs{}, fmt.Errorf("%s: no Go module found for go -C directory: %s", filePath, workdir)
 			}
@@ -271,7 +354,7 @@ func scanModuleDirectives(ctx context.Context, ws *dagger.Workspace, modulePath 
 		}
 	}
 	span.SetAttributes(
-		attribute.String("go_includes.mode", mode.String()),
+		attribute.String("go_includes.mode", t.modeString()),
 		attribute.String("go_includes.module_path", modulePath),
 		attribute.Int("go_includes.file_count", len(goFiles)),
 		attribute.Int("go_includes.include_count", len(includes.list)),
@@ -280,60 +363,8 @@ func scanModuleDirectives(ctx context.Context, ws *dagger.Workspace, modulePath 
 	return discoveredInputs{includes: includes.list, modules: modules.list}, nil
 }
 
-// nestedModuleExcludes returns globs that keep a scan within one module.
-func nestedModuleExcludes(modulePaths []string, modulePath string) []string {
-	var excludes []string
-	for _, nestedPath := range modulePaths {
-		if modulePath == "." {
-			if nestedPath != "." {
-				excludes = append(excludes, nestedPath+"/**")
-			}
-			continue
-		}
-		if nestedPath != modulePath && strings.HasPrefix(nestedPath, strings.TrimSuffix(modulePath, "/")+"/") {
-			excludes = append(excludes, nestedPath+"/**")
-		}
-	}
-	sort.Strings(excludes)
-	return excludes
-}
-
-// moduleIndex returns every module root, plus a set for ancestor lookups.
-func moduleIndex(ctx context.Context, ws *dagger.Workspace) ([]string, map[string]bool, error) {
-	goMods, err := workspaceDirectory(ws, []string{"**/go.mod"}, nil).Glob(ctx, "**/go.mod")
-	if err != nil {
-		return nil, nil, err
-	}
-	sort.Strings(goMods)
-	modulePaths := make([]string, 0, len(goMods))
-	moduleSet := map[string]bool{}
-	for _, goModPath := range goMods {
-		modulePath := strings.TrimSuffix(goModPath, "/go.mod")
-		if goModPath == "go.mod" {
-			modulePath = "."
-		}
-		modulePaths = append(modulePaths, modulePath)
-		moduleSet[modulePath] = true
-	}
-	return modulePaths, moduleSet, nil
-}
-
-// containingModuleDir finds the nearest ancestor module root for a workspace path.
-func containingModuleDir(dir string, moduleSet map[string]bool) (string, bool) {
-	dir = cleanWorkspacePath(dir)
-	for {
-		if moduleSet[dir] {
-			return dir, true
-		}
-		if dir == "." {
-			return "", false
-		}
-		dir = path.Dir(dir)
-	}
-}
-
 // scanGoFileDirectives parses one Go file and resolves directive paths.
-func scanGoFileDirectives(filePath string, data []byte, mode includeModes) (discoveredInputs, error) {
+func scanGoFileDirectives(filePath string, data []byte, test, generate bool) (discoveredInputs, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments)
 	if err != nil {
@@ -349,7 +380,7 @@ func scanGoFileDirectives(filePath string, data []byte, mode includeModes) (disc
 	scan := discoveredInputs{}
 	for _, group := range file.Comments {
 		for _, comment := range group.List {
-			commentScan, err := scanCommentDirective(comment.Text, mode)
+			commentScan, err := scanCommentDirective(comment.Text, test, generate)
 			if err != nil {
 				return discoveredInputs{}, fmt.Errorf("%s: %w", fset.Position(comment.Slash), err)
 			}
@@ -365,7 +396,7 @@ func scanGoFileDirectives(filePath string, data []byte, mode includeModes) (disc
 }
 
 // scanCommentDirective extracts supported include directives from one comment.
-func scanCommentDirective(comment string, mode includeModes) (discoveredInputs, error) {
+func scanCommentDirective(comment string, test, generate bool) (discoveredInputs, error) {
 	if args, ok := directiveArguments(comment, "go:embed"); ok {
 		patterns, err := parseDirectiveArgs("go:embed", args)
 		if err != nil {
@@ -377,7 +408,7 @@ func scanCommentDirective(comment string, mode includeModes) (discoveredInputs, 
 		return discoveredInputs{includes: patterns}, nil
 	}
 
-	if mode.test {
+	if test {
 		if args, ok := directiveArguments(comment, "go:test:include"); ok {
 			patterns, err := parseDirectiveArgs("go:test:include", args)
 			if err != nil {
@@ -387,7 +418,7 @@ func scanCommentDirective(comment string, mode includeModes) (discoveredInputs, 
 		}
 	}
 
-	if mode.generate {
+	if generate {
 		if args, ok := directiveArguments(comment, "go:generate:include"); ok {
 			patterns, err := parseDirectiveArgs("go:generate:include", args)
 			if err != nil {
@@ -446,17 +477,6 @@ func goGenerateWorkdir(args []string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// goModLocalReplaceModules returns local replace targets for one module's go.mod.
-func goModLocalReplaceModules(ctx context.Context, ws *dagger.Workspace, modulePath string) ([]string, error) {
-	goModPath := addIncludePrefix(modulePath, "go.mod")
-	dir := workspaceDirectory(ws, []string{goModPath}, nil)
-	data, err := readRegularFile(ctx, dir, goModPath)
-	if err != nil {
-		return nil, err
-	}
-	return goModLocalReplaceModulePaths(goModPath, data)
 }
 
 // goModLocalReplaceModulePaths parses local replace directives into module roots.

@@ -18,7 +18,7 @@ import "embed"
 var embedded embed.FS
 `)
 
-	gotLint, err := scanGoFileDirectives("pkg/includes_test.go", data, modeLint)
+	gotLint, err := scanGoFileDirectives("pkg/includes_test.go", data, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ var embedded embed.FS
 		t.Fatalf("lint includes mismatch:\n got: %#v\nwant: %#v", gotLint, wantLint)
 	}
 
-	gotTest, err := scanGoFileDirectives("pkg/includes_test.go", data, modeTest)
+	gotTest, err := scanGoFileDirectives("pkg/includes_test.go", data, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ var embedded embed.FS
 		t.Fatalf("test includes mismatch:\n got: %#v\nwant: %#v", gotTest, wantTest)
 	}
 
-	gotGenerate, err := scanGoFileDirectives("pkg/includes_test.go", data, modeGenerate)
+	gotGenerate, err := scanGoFileDirectives("pkg/includes_test.go", data, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ var embedded embed.FS
 		t.Fatalf("generate includes mismatch:\n got: %#v\nwant: %#v", gotGenerate, wantGenerate)
 	}
 
-	gotCombined, err := scanGoFileDirectives("pkg/includes_test.go", data, includeModesFromFlags(false, true, true))
+	gotCombined, err := scanGoFileDirectives("pkg/includes_test.go", data, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,18 +108,18 @@ replace example.com/versioned => example.com/versioned v1.2.3
 }
 
 func TestIncludeHelpers(t *testing.T) {
-	if got := includeModesFromFlags(false, false, false); !reflect.DeepEqual(got, modeTest) {
-		t.Fatalf("default include mode got %#v, want %#v", got, modeTest)
+	if got := (target{test: true}).modeString(); got != "test" {
+		t.Fatalf("modeString got %q, want test", got)
 	}
 	if got := addIncludePrefix("pkg", "/from-root.txt"); got != "from-root.txt" {
 		t.Fatalf("absolute include got %q", got)
 	}
-	moduleSet := map[string]bool{
+	ws := &workspace{moduleSet: map[string]bool{
 		".":       true,
 		"pkg/mod": true,
-	}
-	if got, ok := containingModuleDir("pkg/mod/subdir", moduleSet); !ok || got != "pkg/mod" {
-		t.Fatalf("containingModuleDir got %q, %v", got, ok)
+	}}
+	if got, ok := ws.containingModuleDir("pkg/mod/subdir"); !ok || got != "pkg/mod" {
+		t.Fatalf("workspace.containingModuleDir got %q, %v", got, ok)
 	}
 
 	set := newIncludeSet("a", "", "b", "a")
@@ -131,14 +131,14 @@ func TestIncludeHelpers(t *testing.T) {
 }
 
 func TestInvalidQuotedDirectiveArg(t *testing.T) {
-	_, err := scanCommentDirective(`//go:test:include "unterminated`, modeTest)
+	_, err := scanCommentDirective(`//go:test:include "unterminated`, true, false)
 	if err == nil {
 		t.Fatal("expected error")
 	}
 }
 
 func TestRelativeCLIPathRejected(t *testing.T) {
-	_, err := run(t.Context(), []string{"relative/module"})
+	_, err := newTarget(t.Context(), []string{"relative/module"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -158,7 +158,7 @@ func TestNonDirectiveCommentsAreIgnored(t *testing.T) {
 		"/* go:test:include assets */",
 	}
 	for _, test := range tests {
-		got, err := scanCommentDirective(test, modeTest)
+		got, err := scanCommentDirective(test, true, false)
 		if err != nil {
 			t.Fatalf("%q: %v", test, err)
 		}
