@@ -78,6 +78,25 @@ type Go {
   }
 
   """
+  Run golangci-lint in every discovered Go module.
+  Modules with the lint skip marker are skipped.
+  """
+  pub lintAll(ws: Workspace!): Void @check {
+    let layers = modules(ws).reduce(directory) { layers, mod =>
+      layers.withDirectory(
+        mod.path,
+        directory.withFile("go.mod", mod.lintExec(ws).file("go.mod")),
+      )
+    }
+    # FIXME: replace this when Dagger can directly run multiple containers in
+    # parallel. For now, merge one file from each module's lint container into
+    # a directory and sync it to force every module lint command to run.
+
+    layers.sync
+    null
+  }
+
+  """
   Run tests in every discovered Go module.
   Modules with the test skip marker are skipped.
   """
@@ -343,6 +362,15 @@ type GoModule {
   }
 
   """
+  Run golangci-lint in this module.
+  If the lint skip marker is present, no lint check is run.
+  """
+  pub lint(ws: Workspace!): Void @check {
+    lintExec(ws).sync
+    null
+  }
+
+  """
   Run tests in this module.
   If the test skip marker is present, no tests are run.
   """
@@ -374,6 +402,38 @@ type GoModule {
       .withDirectory(".", source(ws))
       .withWorkdir(path)
       .withExec(["go", "generate", "./..."], experimentalPrivilegedNesting: true)
+  }
+
+  """
+  Container synced by this module's lint check.
+  """
+  let lintExec(ws: Workspace!): Container! {
+    if (skipLint(ws)) {
+      base
+        .withDirectory(".", ws.directory("/", include: [subpath("go.mod")]))
+        .withWorkdir(path)
+    } else {
+      let lintImage = "docker.io/golangci/golangci-lint:v2.11.4-alpine@sha256:" +
+        "72bcd68512b4e27540dd3a778a1b7afd45759d8145cfb3c089f1d7af53e718e9"
+      container
+        .from(lintImage)
+        .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+        .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+        .withMountedCache("/root/.cache/golangci-lint", cacheVolume("golangci-lint"))
+        .withWorkdir("/src")
+        .withDirectory(".", source(ws))
+        .withWorkdir(path)
+        .withExec([
+          "golangci-lint", "run",
+          "--path-prefix", path + "/",
+          "--output.tab.path=stderr",
+          "--output.tab.print-linter-name=true",
+          "--output.tab.colors=false",
+          "--show-stats=false",
+          "--max-issues-per-linter=0",
+          "--max-same-issues=0",
+        ])
+    }
   }
 
   """
