@@ -19,7 +19,6 @@ import (
 
 	"dagger.io/dagger"
 	telemetry "github.com/dagger/otel-go"
-	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/mod/modfile"
 )
 
@@ -96,11 +95,6 @@ func newTargetModule(ws *workspace, moduleRoot string, lint, test, generate bool
 		test:       test,
 		generate:   generate,
 	}, nil
-}
-
-// Tracer returns the helper's telemetry tracer.
-func Tracer(ctx context.Context) trace.Tracer {
-	return telemetry.Tracer(ctx, instrumentationLibrary)
 }
 
 // workspace wraps a Dagger workspace with indexes shared by include targets.
@@ -182,17 +176,6 @@ func (w *workspace) nestedModuleExcludes(moduleRoot string) []string {
 	}
 	sort.Strings(excludes)
 	return excludes
-}
-
-// localReplaceModules returns local replace targets for one module's go.mod.
-func (w *workspace) localReplaceModules(ctx context.Context, moduleRoot string) ([]string, error) {
-	goModPath := path.Join(moduleRoot, "go.mod")
-	dir := w.directory([]string{goModPath}, nil)
-	data, err := readRegularFile(ctx, dir, goModPath)
-	if err != nil {
-		return nil, err
-	}
-	return goModLocalReplaceModulePaths(goModPath, data)
 }
 
 // targetModule is one module root and operation-specific include behavior.
@@ -352,7 +335,13 @@ func (t targetModule) modulesFromGoGenerateGoDashC(ctx context.Context) ([]*targ
 
 // modulesFromGoModLocalReplace resolves local go.mod replace targets to modules.
 func (t targetModule) modulesFromGoModLocalReplace(ctx context.Context) ([]*targetModule, error) {
-	moduleRoots, err := t.workspace.localReplaceModules(ctx, t.moduleRoot)
+	goModPath := t.subpath("go.mod")
+	dir := t.workspace.directory([]string{goModPath}, nil)
+	data, err := readRegularFile(ctx, dir, goModPath)
+	if err != nil {
+		return nil, err
+	}
+	moduleRoots, err := goModLocalReplaceModulePaths(goModPath, data)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +396,7 @@ func directiveGenerateModules(directives []goDirective, ws *workspace) ([]string
 		if !directive.isGenerate() || !directive.isGenerateGoDashC() {
 			continue
 		}
-		workdir, err := directive.generateGoDashCValue()
+		workdir, _, err := directive.generateGoDashC()
 		if err != nil {
 			return nil, err
 		}
@@ -474,7 +463,7 @@ func goDirectivesInFile(filePath string, data []byte) ([]goDirective, error) {
 				position: fset.Position(comment.Slash).String(),
 				comment:  comment.Text,
 			}
-			if directive.isKnown() {
+			if directive.isEmbed() || directive.isTestInclude() || directive.isGenerateInclude() || directive.isGenerate() {
 				directives = append(directives, directive)
 			}
 		}
@@ -496,11 +485,6 @@ func (d goDirective) dir() string {
 		return ""
 	}
 	return dir
-}
-
-// isKnown reports whether the directive is relevant to include discovery.
-func (d goDirective) isKnown() bool {
-	return d.isEmbed() || d.isTestInclude() || d.isGenerateInclude() || d.isGenerate()
 }
 
 // isEmbed reports whether the directive is //go:embed.
@@ -531,21 +515,48 @@ func (d goDirective) isGenerateGoDashC() bool {
 
 // args parses the directive arguments.
 func (d goDirective) args() ([]string, error) {
-	name, argString, ok := d.nameAndArgs()
-	if !ok {
+	var name string
+	var argString string
+	for _, candidate := range []string{"go:embed", "go:test:include", "go:generate:include", "go:generate"} {
+		args, ok := d.argsForName(candidate)
+		if !ok {
+			continue
+		}
+		name = candidate
+		argString = args
+		break
+	}
+	if name == "" {
 		return nil, nil
 	}
-	args, err := parseDirectiveArgs(name, argString)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", d.position, err)
+
+	var args []string
+	for argString = strings.TrimLeftFunc(argString, unicode.IsSpace); argString != ""; argString = strings.TrimLeftFunc(argString, unicode.IsSpace) {
+		switch argString[0] {
+		case '`', '"':
+			quoted, err := strconv.QuotedPrefix(argString)
+			if err != nil {
+				return nil, fmt.Errorf("%s: invalid quoted string in //%s: %s", d.position, name, argString)
+			}
+			arg, err := strconv.Unquote(quoted)
+			if err != nil {
+				return nil, fmt.Errorf("%s: invalid quoted string in //%s: %s", d.position, name, quoted)
+			}
+			args = append(args, arg)
+			argString = argString[len(quoted):]
+			if argString != "" && strings.TrimLeftFunc(argString, unicode.IsSpace) == argString {
+				return nil, fmt.Errorf("%s: invalid quoted string in //%s: %s", d.position, name, argString)
+			}
+		default:
+			i := strings.IndexFunc(argString, unicode.IsSpace)
+			if i < 0 {
+				i = len(argString)
+			}
+			args = append(args, argString[:i])
+			argString = argString[i:]
+		}
 	}
 	return args, nil
-}
-
-// generateGoDashCValue returns the -C value for a generate directive, if present.
-func (d goDirective) generateGoDashCValue() (string, error) {
-	workdir, _, err := d.generateGoDashC()
-	return workdir, err
 }
 
 // includePatterns returns include patterns from this directive.
@@ -586,16 +597,6 @@ func (d goDirective) prefixed(patterns []string) []string {
 func (d goDirective) hasName(name string) bool {
 	_, ok := d.argsForName(name)
 	return ok
-}
-
-// nameAndArgs returns the directive name and raw argument tail.
-func (d goDirective) nameAndArgs() (string, string, bool) {
-	for _, name := range []string{"go:embed", "go:test:include", "go:generate:include", "go:generate"} {
-		if args, ok := d.argsForName(name); ok {
-			return name, args, true
-		}
-	}
-	return "", "", false
 }
 
 // argsForName returns the argument tail for an exact line directive name.
@@ -650,7 +651,7 @@ func goModLocalReplaceModulePaths(goModPath string, data []byte) ([]string, erro
 
 	var includes []string
 	for _, replace := range file.Replace {
-		if replace.New.Version != "" || !isWorkspaceRelativePath(replace.New.Path) {
+		if replace.New.Version != "" || (!strings.HasPrefix(replace.New.Path, "./") && !strings.HasPrefix(replace.New.Path, "../")) {
 			continue
 		}
 		target := strings.TrimSuffix(replace.New.Path, "/")
@@ -661,42 +662,6 @@ func goModLocalReplaceModulePaths(goModPath string, data []byte) ([]string, erro
 		includes = append(includes, target)
 	}
 	return includes, nil
-}
-
-// parseDirectiveArgs splits directive arguments with Go string literal support.
-func parseDirectiveArgs(name, args string) ([]string, error) {
-	var parsed []string
-	for args = strings.TrimLeftFunc(args, unicode.IsSpace); args != ""; args = strings.TrimLeftFunc(args, unicode.IsSpace) {
-		switch args[0] {
-		case '`', '"':
-			quoted, err := strconv.QuotedPrefix(args)
-			if err != nil {
-				return nil, fmt.Errorf("invalid quoted string in //%s: %s", name, args)
-			}
-			arg, err := strconv.Unquote(quoted)
-			if err != nil {
-				return nil, fmt.Errorf("invalid quoted string in //%s: %s", name, quoted)
-			}
-			parsed = append(parsed, arg)
-			args = args[len(quoted):]
-			if args != "" && strings.TrimLeftFunc(args, unicode.IsSpace) == args {
-				return nil, fmt.Errorf("invalid quoted string in //%s: %s", name, args)
-			}
-		default:
-			i := strings.IndexFunc(args, unicode.IsSpace)
-			if i < 0 {
-				i = len(args)
-			}
-			parsed = append(parsed, args[:i])
-			args = args[i:]
-		}
-	}
-	return parsed, nil
-}
-
-// isWorkspaceRelativePath reports whether a go.mod path can point inside the workspace.
-func isWorkspaceRelativePath(path string) bool {
-	return strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../")
 }
 
 // cleanWorkspacePath converts an absolute workspace path into the internal relative form.
