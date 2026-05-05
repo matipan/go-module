@@ -19,13 +19,13 @@ import (
 
 	"dagger.io/dagger"
 	telemetry "github.com/dagger/otel-go"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/mod/modfile"
 )
 
 var errNotRegularFile = errors.New("not a regular file")
 
+// includeModes selects the operation-specific directive families to honor.
 type includeModes struct {
 	lint     bool
 	test     bool
@@ -38,6 +38,7 @@ var (
 	modeGenerate = includeModes{generate: true}
 )
 
+// includeModesFromFlags converts CLI mode flags into scan behavior.
 func includeModesFromFlags(lint, test, generate bool) includeModes {
 	if !lint && !test && !generate {
 		test = true
@@ -49,6 +50,7 @@ func includeModesFromFlags(lint, test, generate bool) includeModes {
 	}
 }
 
+// String returns a compact mode label for trace attributes.
 func (m includeModes) String() string {
 	var names []string
 	if m.lint {
@@ -93,8 +95,9 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [/DIR]")
 }
 
+// run parses CLI flags and emits include patterns for an absolute workspace path.
 func run(ctx context.Context, args []string) (includes []string, rerr error) {
-	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes")
+	ctx, span := telemetry.Tracer(ctx, "go-includes").Start(ctx, "go-includes")
 	defer telemetry.EndWithCause(span, &rerr)
 
 	flags := newFlags()
@@ -129,6 +132,7 @@ func run(ctx context.Context, args []string) (includes []string, rerr error) {
 	return includes, rerr
 }
 
+// newFlags builds the helper's isolated flag set.
 func newFlags() *flag.FlagSet {
 	flags := flag.NewFlagSet("go-includes", flag.ExitOnError)
 	flags.Usage = func() {
@@ -138,6 +142,7 @@ func newFlags() *flag.FlagSet {
 	return flags
 }
 
+// workspaceDirectory returns a workspace-root directory filtered by include globs.
 func workspaceDirectory(ws *dagger.Workspace, include, exclude []string) *dagger.Directory {
 	return ws.Directory("/", dagger.WorkspaceDirectoryOpts{
 		Include: append([]string(nil), include...),
@@ -145,6 +150,7 @@ func workspaceDirectory(ws *dagger.Workspace, include, exclude []string) *dagger
 	})
 }
 
+// readRegularFile reads a file from a Dagger directory and reports directories distinctly.
 func readRegularFile(ctx context.Context, dir *dagger.Directory, filePath string) ([]byte, error) {
 	cleanPath := cleanWorkspacePath(filePath)
 	if escapesWorkspace(cleanPath) {
@@ -161,6 +167,7 @@ func readRegularFile(ctx context.Context, dir *dagger.Directory, filePath string
 	return []byte(contents), nil
 }
 
+// moduleIncludes computes extra include patterns reachable from a module.
 func moduleIncludes(ctx context.Context, ws *dagger.Workspace, modulePath string, mode includeModes) ([]string, error) {
 	walker, err := newIncludeWalker(ctx, ws, modulePath, mode)
 	if err != nil {
@@ -169,6 +176,7 @@ func moduleIncludes(ctx context.Context, ws *dagger.Workspace, modulePath string
 	return walker.walk(ctx)
 }
 
+// includeWalker traverses module roots discovered from replaces and generate workdirs.
 type includeWalker struct {
 	ws          *dagger.Workspace
 	mode        includeModes
@@ -180,6 +188,7 @@ type includeWalker struct {
 	includes    *includeSet
 }
 
+// newIncludeWalker indexes workspace go.mod files and resolves the initial path upward.
 func newIncludeWalker(ctx context.Context, ws *dagger.Workspace, initial string, mode includeModes) (*includeWalker, error) {
 	goMods, err := goModPaths(ctx, ws)
 	if err != nil {
@@ -214,6 +223,7 @@ func newIncludeWalker(ctx context.Context, ws *dagger.Workspace, initial string,
 	return walker, nil
 }
 
+// enqueue adds a module root to the traversal queue once.
 func (w *includeWalker) enqueue(modulePath string) error {
 	modulePath = cleanWorkspacePath(modulePath)
 	if escapesWorkspace(modulePath) {
@@ -230,6 +240,7 @@ func (w *includeWalker) enqueue(modulePath string) error {
 	return nil
 }
 
+// walk drains the module queue and accumulates extra include patterns.
 func (w *includeWalker) walk(ctx context.Context) ([]string, error) {
 	for len(w.queue) > 0 {
 		modulePath := w.queue[0]
@@ -258,6 +269,7 @@ func (w *includeWalker) walk(ctx context.Context) ([]string, error) {
 	return w.includes.list, nil
 }
 
+// baseIncludes returns the static Go source patterns for a module root.
 func baseIncludes(modulePath string) []string {
 	patterns := []string{
 		"**/*.go",
@@ -277,13 +289,15 @@ func baseIncludes(modulePath string) []string {
 	return patterns
 }
 
+// directiveScan records include patterns and additional module roots from comments.
 type directiveScan struct {
 	includes []string
 	modules  []string
 }
 
+// directiveIncludes scans Go files in one module, excluding nested modules.
 func directiveIncludes(ctx context.Context, ws *dagger.Workspace, modulePath string, mode includeModes, modulePaths []string, moduleSet map[string]bool) (_ directiveScan, rerr error) {
-	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes scan directives")
+	ctx, span := telemetry.Tracer(ctx, "go-includes").Start(ctx, "go-includes scan directives")
 	defer telemetry.EndWithCause(span, &rerr)
 
 	excludes := nestedModuleExcludes(modulePaths, modulePath)
@@ -327,6 +341,7 @@ func directiveIncludes(ctx context.Context, ws *dagger.Workspace, modulePath str
 	return directiveScan{includes: includes.list, modules: modules.list}, nil
 }
 
+// nestedModuleExcludes returns globs that keep a scan within one module.
 func nestedModuleExcludes(modulePaths []string, modulePath string) []string {
 	var excludes []string
 	for _, nestedPath := range modulePaths {
@@ -344,6 +359,7 @@ func nestedModuleExcludes(modulePaths []string, modulePath string) []string {
 	return excludes
 }
 
+// goModPaths returns every go.mod path visible in the workspace.
 func goModPaths(ctx context.Context, ws *dagger.Workspace) ([]string, error) {
 	goMods, err := workspaceDirectory(ws, []string{"**/go.mod"}, nil).Glob(ctx, "**/go.mod")
 	if err != nil {
@@ -353,6 +369,7 @@ func goModPaths(ctx context.Context, ws *dagger.Workspace) ([]string, error) {
 	return goMods, nil
 }
 
+// modulePathForGoMod converts a go.mod file path into its module root.
 func modulePathForGoMod(goModPath string) string {
 	if goModPath == "go.mod" {
 		return "."
@@ -360,6 +377,7 @@ func modulePathForGoMod(goModPath string) string {
 	return strings.TrimSuffix(goModPath, "/go.mod")
 }
 
+// containingModuleDir finds the nearest ancestor module root for a workspace path.
 func containingModuleDir(dir string, moduleSet map[string]bool) (string, bool) {
 	dir = cleanWorkspacePath(dir)
 	for {
@@ -373,6 +391,7 @@ func containingModuleDir(dir string, moduleSet map[string]bool) (string, bool) {
 	}
 }
 
+// goDirectiveIncludesFromBytes parses one Go file and resolves directive paths.
 func goDirectiveIncludesFromBytes(filePath string, data []byte, mode includeModes) (directiveScan, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments)
@@ -399,6 +418,7 @@ func goDirectiveIncludesFromBytes(filePath string, data []byte, mode includeMode
 	return scan, nil
 }
 
+// includePrefixForGoFile returns the workspace directory containing a Go file.
 func includePrefixForGoFile(filePath string) string {
 	filePath = cleanWorkspacePath(filePath)
 	fileDir := path.Dir(filePath)
@@ -408,6 +428,7 @@ func includePrefixForGoFile(filePath string) string {
 	return fileDir
 }
 
+// includePatternsFromComment extracts supported include directives from one comment.
 func includePatternsFromComment(comment string, mode includeModes) (directiveScan, error) {
 	if args, ok := directiveArgs(comment, "go:embed"); ok {
 		patterns, err := parseDirectiveArgs("go:embed", args)
@@ -455,6 +476,7 @@ func includePatternsFromComment(comment string, mode includeModes) (directiveSca
 	return directiveScan{}, nil
 }
 
+// directiveArgs returns the argument tail for an exact line directive name.
 func directiveArgs(comment, name string) (string, bool) {
 	prefix := "//" + name
 	if !strings.HasPrefix(comment, prefix) {
@@ -467,6 +489,7 @@ func directiveArgs(comment, name string) (string, bool) {
 	return args, true
 }
 
+// goGenerateWorkdir recognizes go generate commands that change directory with -C.
 func goGenerateWorkdir(args []string) (string, bool) {
 	if len(args) == 0 || args[0] != "go" {
 		return "", false
@@ -489,6 +512,7 @@ func goGenerateWorkdir(args []string) (string, bool) {
 	return "", false
 }
 
+// goModLocalReplaceModules returns local replace targets for one module's go.mod.
 func goModLocalReplaceModules(ctx context.Context, ws *dagger.Workspace, modulePath string) ([]string, error) {
 	goModPath := addIncludePrefix(modulePath, "go.mod")
 	dir := workspaceDirectory(ws, []string{goModPath}, nil)
@@ -499,6 +523,7 @@ func goModLocalReplaceModules(ctx context.Context, ws *dagger.Workspace, moduleP
 	return goModLocalReplaceModulePaths(goModPath, data)
 }
 
+// goModLocalReplaceModulePaths parses local replace directives into module roots.
 func goModLocalReplaceModulePaths(goModPath string, data []byte) ([]string, error) {
 	file, err := modfile.Parse(goModPath, data, nil)
 	if err != nil {
@@ -520,6 +545,7 @@ func goModLocalReplaceModulePaths(goModPath string, data []byte) ([]string, erro
 	return includes, nil
 }
 
+// parseDirectiveArgs splits directive arguments with Go string literal support.
 func parseDirectiveArgs(name, args string) ([]string, error) {
 	var parsed []string
 	for args = strings.TrimLeftFunc(args, unicode.IsSpace); args != ""; args = strings.TrimLeftFunc(args, unicode.IsSpace) {
@@ -550,23 +576,28 @@ func parseDirectiveArgs(name, args string) ([]string, error) {
 	return parsed, nil
 }
 
+// startsWithSpace reports whether a string begins with Unicode whitespace.
 func startsWithSpace(s string) bool {
 	r, _ := utf8.DecodeRuneInString(s)
 	return unicode.IsSpace(r)
 }
 
+// isWorkspaceRelativePath reports whether a go.mod path can point inside the workspace.
 func isWorkspaceRelativePath(path string) bool {
 	return strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../")
 }
 
+// cleanWorkspacePath converts an absolute workspace path into the internal relative form.
 func cleanWorkspacePath(filePath string) string {
 	return path.Clean(strings.TrimPrefix(filePath, "/"))
 }
 
+// escapesWorkspace reports whether a cleaned relative path leaves the workspace root.
 func escapesWorkspace(filePath string) bool {
 	return filePath == ".." || strings.HasPrefix(filePath, "../")
 }
 
+// addIncludePrefix resolves a directive pattern relative to a workspace directory.
 func addIncludePrefix(prefix, pattern string) string {
 	if strings.HasPrefix(pattern, "/") {
 		return strings.TrimPrefix(pattern, "/")
@@ -578,17 +609,20 @@ func addIncludePrefix(prefix, pattern string) string {
 	return prefix + "/" + pattern
 }
 
+// includeSet preserves insertion order while de-duplicating include patterns.
 type includeSet struct {
 	list []string
 	seen map[string]struct{}
 }
 
+// newIncludeSet builds an ordered set preloaded with patterns.
 func newIncludeSet(patterns ...string) *includeSet {
 	set := &includeSet{}
 	set.add(patterns...)
 	return set
 }
 
+// add appends unseen, non-empty patterns to the set.
 func (s *includeSet) add(patterns ...string) {
 	if s.seen == nil {
 		s.seen = map[string]struct{}{}
