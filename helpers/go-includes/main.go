@@ -217,7 +217,7 @@ func (t target) includes(ctx context.Context) ([]string, error) {
 
 	queued := map[string]bool{initialModule: true}
 	queue := []string{initialModule}
-	includes := newIncludeSet()
+	var includes []string
 	enqueue := func(modulePath string) error {
 		modulePath = cleanWorkspacePath(modulePath)
 		if escapesWorkspace(modulePath) {
@@ -238,14 +238,14 @@ func (t target) includes(ctx context.Context) ([]string, error) {
 		queue = queue[1:]
 
 		if modulePath != initialModule {
-			includes.add(baseIncludes(modulePath)...)
+			includes = append(includes, baseIncludes(modulePath)...)
 		}
 
 		scan, err := t.scanModuleDirectives(ctx, modulePath)
 		if err != nil {
 			return nil, err
 		}
-		includes.add(scan.includes...)
+		includes = append(includes, scan.includes...)
 
 		replaces, err := t.workspace.localReplaceModules(ctx, modulePath)
 		if err != nil {
@@ -257,7 +257,16 @@ func (t target) includes(ctx context.Context) ([]string, error) {
 			}
 		}
 	}
-	return includes.list, nil
+	deduped := make([]string, 0, len(includes))
+	seen := map[string]bool{}
+	for _, include := range includes {
+		if seen[include] {
+			continue
+		}
+		seen[include] = true
+		deduped = append(deduped, include)
+	}
+	return deduped, nil
 }
 
 // print writes the target include patterns, one per line.
@@ -330,8 +339,8 @@ func (t target) scanModuleDirectives(ctx context.Context, modulePath string) (_ 
 	}
 	sort.Strings(goFiles)
 
-	includes := newIncludeSet()
-	modules := newIncludeSet()
+	var includes []string
+	var modules []string
 	for _, filePath := range goFiles {
 		data, err := readRegularFile(ctx, dir, filePath)
 		if errors.Is(err, errNotRegularFile) {
@@ -344,23 +353,23 @@ func (t target) scanModuleDirectives(ctx context.Context, modulePath string) (_ 
 		if err != nil {
 			return discoveredInputs{}, err
 		}
-		includes.add(fileScan.includes...)
+		includes = append(includes, fileScan.includes...)
 		for _, workdir := range fileScan.modules {
 			module, ok := t.workspace.containingModuleDir(workdir)
 			if !ok {
 				return discoveredInputs{}, fmt.Errorf("%s: no Go module found for go -C directory: %s", filePath, workdir)
 			}
-			modules.add(module)
+			modules = append(modules, module)
 		}
 	}
 	span.SetAttributes(
 		attribute.String("go_includes.mode", t.modeString()),
 		attribute.String("go_includes.module_path", modulePath),
 		attribute.Int("go_includes.file_count", len(goFiles)),
-		attribute.Int("go_includes.include_count", len(includes.list)),
-		attribute.Int("go_includes.discovered_module_count", len(modules.list)),
+		attribute.Int("go_includes.include_count", len(includes)),
+		attribute.Int("go_includes.discovered_module_count", len(modules)),
 	)
-	return discoveredInputs{includes: includes.list, modules: modules.list}, nil
+	return discoveredInputs{includes: includes, modules: modules}, nil
 }
 
 // scanGoFileDirectives parses one Go file and resolves directive paths.
@@ -557,34 +566,4 @@ func addIncludePrefix(prefix, pattern string) string {
 		return pattern
 	}
 	return prefix + "/" + pattern
-}
-
-// includeSet preserves insertion order while de-duplicating include patterns.
-type includeSet struct {
-	list []string
-	seen map[string]struct{}
-}
-
-// newIncludeSet builds an ordered set preloaded with patterns.
-func newIncludeSet(patterns ...string) *includeSet {
-	set := &includeSet{}
-	set.add(patterns...)
-	return set
-}
-
-// add appends unseen, non-empty patterns to the set.
-func (s *includeSet) add(patterns ...string) {
-	if s.seen == nil {
-		s.seen = map[string]struct{}{}
-	}
-	for _, pattern := range patterns {
-		if pattern == "" {
-			continue
-		}
-		if _, ok := s.seen[pattern]; ok {
-			continue
-		}
-		s.seen[pattern] = struct{}{}
-		s.list = append(s.list, pattern)
-	}
 }

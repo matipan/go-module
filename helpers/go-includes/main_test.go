@@ -122,12 +122,6 @@ func TestIncludeHelpers(t *testing.T) {
 		t.Fatalf("workspace.containingModuleDir got %q, %v", got, ok)
 	}
 
-	set := newIncludeSet("a", "", "b", "a")
-	set.add("c", "b")
-	want := []string{"a", "b", "c"}
-	if !reflect.DeepEqual(set.list, want) {
-		t.Fatalf("includeSet mismatch:\n got: %#v\nwant: %#v", set.list, want)
-	}
 }
 
 func TestInvalidQuotedDirectiveArg(t *testing.T) {
