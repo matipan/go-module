@@ -90,7 +90,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: go-includes --path=DIR [--lint] [--test] [--generate]")
+	fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [DIR]")
 }
 
 func run(ctx context.Context, args []string) (includes []string, rerr error) {
@@ -98,17 +98,13 @@ func run(ctx context.Context, args []string) (includes []string, rerr error) {
 	defer telemetry.EndWithCause(span, &rerr)
 
 	flags := newFlags()
-	modulePath := flags.String("path", "", "workspace-relative Go module root")
 	lint := flags.Bool("lint", false, "include lint inputs")
 	test := flags.Bool("test", false, "include test inputs")
 	generate := flags.Bool("generate", false, "include generate inputs")
 	if err := flags.Parse(args); err != nil {
 		return nil, err
 	}
-	if *modulePath == "" {
-		return nil, fmt.Errorf("--path is required")
-	}
-	if flags.NArg() != 0 {
+	if flags.NArg() > 1 {
 		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	mode := includeModesFromFlags(*lint, *test, *generate)
@@ -117,7 +113,11 @@ func run(ctx context.Context, args []string) (includes []string, rerr error) {
 		return nil, err
 	}
 
-	modulePathClean := cleanWorkspacePath(*modulePath)
+	modulePath := "."
+	if flags.NArg() == 1 {
+		modulePath = flags.Arg(0)
+	}
+	modulePathClean := cleanWorkspacePath(modulePath)
 	includes, rerr = moduleIncludes(ctx, ws, modulePathClean, mode)
 	span.SetAttributes(
 		attribute.String("go_includes.module_path", modulePathClean),
@@ -191,10 +191,16 @@ func newIncludeWalker(ctx context.Context, ws *dagger.Workspace, initial string,
 		moduleSet[modulePath] = true
 	}
 
+	initialClean := cleanWorkspacePath(initial)
+	initialModule, ok := containingModuleDir(initialClean, moduleSet)
+	if !ok {
+		return nil, fmt.Errorf("no go.mod found containing path: %s", initialClean)
+	}
+
 	walker := &includeWalker{
 		ws:          ws,
 		mode:        mode,
-		initial:     cleanWorkspacePath(initial),
+		initial:     initialModule,
 		modulePaths: modulePaths,
 		moduleSet:   moduleSet,
 		queued:      map[string]bool{},

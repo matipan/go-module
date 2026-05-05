@@ -116,6 +116,13 @@ func TestIncludeHelpers(t *testing.T) {
 	if got := addIncludePrefix("pkg", "/from-root.txt"); got != "from-root.txt" {
 		t.Fatalf("absolute include got %q", got)
 	}
+	moduleSet := map[string]bool{
+		".":       true,
+		"pkg/mod": true,
+	}
+	if got, ok := containingModuleDir("pkg/mod/subdir", moduleSet); !ok || got != "pkg/mod" {
+		t.Fatalf("containingModuleDir got %q, %v", got, ok)
+	}
 
 	set := newIncludeSet("a", "", "b", "a")
 	set.add("c", "b")

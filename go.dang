@@ -140,20 +140,6 @@ type Go {
     after.changes(before)
   }
 
-  """
-  Base container for the Go include helper.
-  """
-  let goIncludesHelper(ws: Workspace!): Container! {
-    container
-      .from("golang:" + version + "-alpine")
-      .withoutEntrypoint
-      .withWorkdir("/helpers/go-includes")
-      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
-      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-      .withEnvVariable("DAGGER_GO_WORKSPACE_ID", toJSON(ws.id))
-      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-  }
-
 }
 
 """
@@ -211,8 +197,9 @@ type GoModule {
       .withWorkdir("/helpers/go-includes")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-      .withEnvVariable("DAGGER_GO_WORKSPACE_ID", toJSON(ws.id))
       .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+      .withEnvVariable("DAGGER_GO_WORKSPACE_ID", toJSON(ws.id))
   }
 
   """
@@ -283,7 +270,7 @@ type GoModule {
   ): [String!]! {
     goIncludesHelper(ws)
       .withExec(
-        ["go", "run", ".", "--path", path] + includeFlags(lint, test, generate),
+        ["go-includes"] + includeFlags(lint, test, generate) + [path],
         experimentalPrivilegedNesting: true,
       )
       .stdout
