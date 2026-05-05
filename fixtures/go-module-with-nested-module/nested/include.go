@@ -1,3 +1,3 @@
 package nested
 
-// workspace:include nested-only.data
+//go:test:include nested-only.data

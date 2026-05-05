@@ -122,17 +122,14 @@ type Go {
   are skipped.
   """
   pub generateAll(ws: Workspace!): Changeset! @generate {
-    # Find generator modules once up front, before paying for per-module source
-    # discovery and container setup.
-    let generatePaths = generateModulePaths(ws)
     let mods = modules(ws).filter { mod =>
-      mod.skipGenerate(ws) == false and generatePaths.filter { path => path == mod.path }.length > 0
+      mod.skipGenerate(ws) == false and mod.hasGenerateDirectives(ws)
     }
 
     # Snapshot each selected module before generation, using the same source
     # boundary that its generate container will receive.
     let before = mods.reduce(directory) { before, mod =>
-      before.withDirectory(mod.path, mod.source(ws).directory(mod.path))
+      before.withDirectory(mod.path, mod.source(ws, generate: true).directory(mod.path))
     }
 
     # Merge each generated module tree back into that snapshot, then diff once
@@ -141,20 +138,6 @@ type Go {
       after.withDirectory(mod.path, mod.generateExec(ws).directory("."))
     }
     after.changes(before)
-  }
-
-  """
-  Go module paths that contain go:generate directives.
-  """
-  let generateModulePaths(ws: Workspace!): [String!]! {
-    goIncludesHelper(ws)
-      .withExec(
-        ["go", "run", ".", "generate-modules"],
-        experimentalPrivilegedNesting: true,
-      )
-      .stdout
-      .split("\n")
-      .filter { path => path != "" }
   }
 
   """
@@ -257,14 +240,15 @@ type GoModule {
   Whether this module's Go files contain a go:generate directive.
   """
   pub hasGenerateDirectives(ws: Workspace!): Boolean! {
-    goIncludesHelper(ws)
-      .withExec(
-        ["go", "run", ".", "generate-modules", "--path", path],
-        experimentalPrivilegedNesting: true,
+    ws
+      .directory("/", include: [subpath("**/*.go")])
+      .search(
+        pattern: "//go:generate",
+        literal: true,
+        filesOnly: true,
+        limit: 1,
       )
-      .stdout
-      .split("\n")
-      .filter { path => path != "" }
+      .{id}
       .length > 0
   }
 
@@ -288,17 +272,33 @@ type GoModule {
 
   """
   Additional workspace include patterns discovered by scanning Go directives
-  and local go.mod replaces reachable from this module's include layers.
+  and local go.mod replaces reachable from this module's include graph.
+  With no include flags, defaults to test inputs.
   """
-  pub includeDiscovered(ws: Workspace!): [String!]! {
+  pub includeDiscovered(
+    ws: Workspace!,
+    lint: Boolean! = false,
+    test: Boolean! = false,
+    generate: Boolean! = false,
+  ): [String!]! {
     goIncludesHelper(ws)
       .withExec(
-        ["go", "run", ".", "module", "--path", path],
+        ["go", "run", ".", "--path", path] + includeFlags(lint, test, generate),
         experimentalPrivilegedNesting: true,
       )
       .stdout
       .split("\n")
       .filter { pattern => pattern != "" }
+  }
+
+  """
+  CLI flags for selecting include sources.
+  """
+  let includeFlags(lint: Boolean!, test: Boolean!, generate: Boolean!): [String!]! {
+    let lintFlags = if (lint) { ["--lint"] } else { [] }
+    let testFlags = if (test) { ["--test"] } else { [] }
+    let generateFlags = if (generate) { ["--generate"] } else { [] }
+    lintFlags + testFlags + generateFlags
   }
 
   """
@@ -312,27 +312,39 @@ type GoModule {
       subpath("**/*.s"),
       subpath("**/*.S"),
       subpath("**/*.syso"),
-      subpath("**/go.mod"),
-      subpath("**/go.sum"),
-      subpath("**/go.work"),
-      subpath("**/go.work.sum"),
+      subpath("go.mod"),
+      subpath("go.sum"),
+      subpath("go.work"),
+      subpath("go.work.sum"),
     ]
   }
 
   """
   Final workspace include patterns used to build this module's source directory.
+  With no include flags, defaults to test inputs.
   """
-  pub include(ws: Workspace!): [String!]! {
-    includeBase + includeExtraFiles + includeDiscovered(ws)
+  pub include(
+    ws: Workspace!,
+    lint: Boolean! = false,
+    test: Boolean! = false,
+    generate: Boolean! = false,
+  ): [String!]! {
+    includeBase + includeExtraFiles + includeDiscovered(ws, lint: lint, test: test, generate: generate)
   }
 
   """
   Workspace source mounted for this module's Go commands.
+  With no include flags, defaults to test inputs.
   """
-  pub source(ws: Workspace!): Directory! {
+  pub source(
+    ws: Workspace!,
+    lint: Boolean! = false,
+    test: Boolean! = false,
+    generate: Boolean! = false,
+  ): Directory! {
     ws.directory(
       "/",
-      include: include(ws),
+      include: include(ws, lint: lint, test: test, generate: generate),
     )
   }
 
@@ -388,7 +400,7 @@ type GoModule {
     if (shouldGenerate(ws) == false) {
       directory.changes(directory)
     } else {
-      let before = directory.withDirectory(path, source(ws).directory(path))
+      let before = directory.withDirectory(path, source(ws, generate: true).directory(path))
       let after = before.withDirectory(path, generateExec(ws).directory("."))
       after.changes(before)
     }
@@ -399,7 +411,7 @@ type GoModule {
   """
   let generateExec(ws: Workspace!): Container! {
     base
-      .withDirectory(".", source(ws))
+      .withDirectory(".", source(ws, generate: true))
       .withWorkdir(path)
       .withExec(["go", "generate", "./..."], experimentalPrivilegedNesting: true)
   }
@@ -421,7 +433,7 @@ type GoModule {
         .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
         .withMountedCache("/root/.cache/golangci-lint", cacheVolume("golangci-lint"))
         .withWorkdir("/src")
-        .withDirectory(".", source(ws))
+        .withDirectory(".", source(ws, lint: true))
         .withWorkdir(path)
         .withExec([
           "golangci-lint", "run",
@@ -447,7 +459,7 @@ type GoModule {
     } else {
       base
         .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@main"])
-        .withDirectory(".", source(ws))
+        .withDirectory(".", source(ws, test: true))
         .withDirectory(".", testData(ws))
         # Nested Dagger clients find the workspace boundary by walking up to .git.
         .withNewFile(".git/HEAD", "ref: refs/heads/main\n")

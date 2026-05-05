@@ -136,20 +136,29 @@ type E2e {
       "module with go:generate directive did not report generate directives",
     )
 
-    let discovered = mod.includeDiscovered(ws)
+    let discovered = mod.includeDiscovered(ws, test: true)
+    let lintDiscovered = mod.includeDiscovered(ws, lint: true)
     assert(
       containsPath(discovered, "LICENSE"),
-      "source includes did not include workspace-root directive include",
+      "test source includes did not include workspace-root directive include",
     )
     assert(
       containsPath(discovered, "testdata/go-module-with-testdata/embedded-assets/message.txt"),
-      "source includes did not include go:embed file",
+      "test source includes did not include go:embed file",
     )
     assert(
-      mod.source(ws).file("LICENSE").contents.contains("Apache License"),
-      "source directory did not include LICENSE",
+      containsPath(lintDiscovered, "LICENSE") == false,
+      "lint source included test-only directive include",
     )
-    let sourceGoFiles = mod.source(ws).glob("**/*.go")
+    assert(
+      containsPath(lintDiscovered, "testdata/go-module-with-testdata/embedded-assets/message.txt"),
+      "lint source did not include go:embed file",
+    )
+    assert(
+      mod.source(ws, test: true).file("LICENSE").contents.contains("Apache License"),
+      "test source directory did not include LICENSE",
+    )
+    let sourceGoFiles = mod.source(ws, test: true).glob("**/*.go")
     assert(
       containsPath(sourceGoFiles, "testdata/go-module-with-testdata/embed_test.go"),
       "source directory did not include module Go file",
@@ -168,28 +177,45 @@ type E2e {
     )
 
     let replaced = go(version: "1.25").module(ws, "fixtures/go-module-with-replace")
-    let replacedIncludes = replaced.includeDiscovered(ws)
+    let replacedIncludes = replaced.includeDiscovered(ws, test: true)
     assert(
-      containsPath(replacedIncludes, "fixtures/go-module-with-replace/../replaced-lib/**"),
-      "go.mod replace includes did not include replaced lib",
+      containsPath(replacedIncludes, "fixtures/replaced-lib/**/*.go"),
+      "go.mod replace includes did not include replaced lib Go files",
+    )
+    assert(
+      containsPath(replacedIncludes, "fixtures/replaced-lib/asset.txt"),
+      "go.mod replace includes did not include replaced lib go:embed file",
     )
 
     let includedGoMod = go(version: "1.25").module(ws, "fixtures/go-module-with-included-gomod-replace/sdk/go")
-    let includedGoModIncludes = includedGoMod.includeDiscovered(ws)
+    let includedGoModIncludes = includedGoMod.includeDiscovered(ws, generate: true)
     assert(
-      containsPath(includedGoModIncludes, "fixtures/go-module-with-included-gomod-replace/./engine/distconsts/**"),
-      "go.mod replace includes did not include replace target from included parent go.mod",
-    )
-    assert(
-      containsPath(includedGoModIncludes, "fixtures/go-module-with-included-gomod-replace/engine/distconsts/../leaf/**"),
-      "go.mod replace includes did not include recursively discovered replace target",
+      containsPath(
+        includedGoModIncludes,
+        "fixtures/go-module-with-included-gomod-replace/**/*.go",
+      ),
+      "go:generate -C did not include generator module Go files",
     )
     assert(
       containsPath(
         includedGoModIncludes,
-        "fixtures/go-module-with-included-gomod-replace/sdk/go/../../**/*.go",
+        "fixtures/go-module-with-included-gomod-replace/engine/distconsts/**/*.go",
       ),
-      "go:generate -C did not include generator module Go files",
+      "go.mod replace includes did not include replace target Go files from generator module",
+    )
+    assert(
+      containsPath(
+        includedGoModIncludes,
+        "fixtures/go-module-with-included-gomod-replace/engine/leaf/**/*.go",
+      ),
+      "go.mod replace includes did not include recursively discovered replace target Go files",
+    )
+    assert(
+      containsPath(
+        includedGoModIncludes,
+        "fixtures/go-module-with-included-gomod-replace/sdk/go/../../cmd/codegen/**",
+      ),
+      "go:generate scoped include did not include generator support files",
     )
     null
   }

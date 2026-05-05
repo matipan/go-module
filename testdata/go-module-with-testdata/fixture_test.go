@@ -1,7 +1,7 @@
 package gomodulewithtestdata
 
-// workspace:include ../*.data
-// workspace:include /LICENSE
+//go:test:include ../*.data
+//go:test:include /LICENSE
 
 import (
 	"os"
@@ -19,7 +19,7 @@ func TestFixtureFromTestdata(t *testing.T) {
 	}
 }
 
-func TestWorkspaceIncludeAnnotation(t *testing.T) {
+func TestGoTestIncludeAnnotation(t *testing.T) {
 	data, err := os.ReadFile("../workspace-include.data")
 	if err != nil {
 		t.Fatal(err)
