@@ -19,10 +19,18 @@ import (
 	"dagger.io/dagger"
 	telemetry "github.com/dagger/otel-go"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/mod/modfile"
 )
 
 var errNotRegularFile = errors.New("not a regular file")
+
+const instrumentationLibrary = "go-includes"
+
+// Tracer returns the helper's telemetry tracer.
+func Tracer(ctx context.Context) trace.Tracer {
+	return telemetry.Tracer(ctx, instrumentationLibrary)
+}
 
 // includeModes selects the operation-specific directive families to honor.
 type includeModes struct {
@@ -68,12 +76,7 @@ func (m includeModes) String() string {
 }
 
 func main() {
-	ctx := context.Background()
-	cfg := telemetry.Config{}
-	if exporter, ok := telemetry.ConfiguredSpanExporter(ctx); ok {
-		cfg.LiveTraceExporters = append(cfg.LiveTraceExporters, exporter)
-	}
-	ctx = telemetry.Init(ctx, cfg)
+	ctx := telemetry.Init(context.Background(), telemetry.Config{Detect: true})
 	defer telemetry.Close()
 
 	var (
@@ -91,10 +94,7 @@ func main() {
 }
 
 // run parses CLI flags and emits include patterns for an absolute workspace path.
-func run(ctx context.Context, args []string) (includes []string, rerr error) {
-	ctx, span := telemetry.Tracer(ctx, "go-includes").Start(ctx, "go-includes")
-	defer telemetry.EndWithCause(span, &rerr)
-
+func run(ctx context.Context, args []string) ([]string, error) {
 	flags := flag.NewFlagSet("go-includes", flag.ExitOnError)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [/DIR]")
@@ -122,13 +122,7 @@ func run(ctx context.Context, args []string) (includes []string, rerr error) {
 	if err != nil {
 		return nil, err
 	}
-	includes, rerr = walkIncludes(ctx, ws, modulePathClean, mode)
-	span.SetAttributes(
-		attribute.String("go_includes.module_path", modulePathClean),
-		attribute.String("go_includes.mode", mode.String()),
-		attribute.Int("go_includes.include_count", len(includes)),
-	)
-	return includes, rerr
+	return walkIncludes(ctx, ws, modulePathClean, mode)
 }
 
 // workspaceDirectory returns a workspace-root directory filtered by include globs.
@@ -242,7 +236,7 @@ type discoveredInputs struct {
 
 // scanModuleDirectives scans Go files in one module, excluding nested modules.
 func scanModuleDirectives(ctx context.Context, ws *dagger.Workspace, modulePath string, mode includeModes, modulePaths []string, moduleSet map[string]bool) (_ discoveredInputs, rerr error) {
-	ctx, span := telemetry.Tracer(ctx, "go-includes").Start(ctx, "go-includes scan directives")
+	ctx, span := Tracer(ctx).Start(ctx, "go-includes scan directives")
 	defer telemetry.EndWithCause(span, &rerr)
 
 	excludes := nestedModuleExcludes(modulePaths, modulePath)
