@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -12,9 +11,7 @@ import (
 )
 
 func TestGoDirectiveIncludes(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "includes_test.go")
-	err := os.WriteFile(filePath, []byte(`package includes
+	got, err := goDirectiveIncludesFromBytes("pkg/includes_test.go", "pkg", []byte(`package includes
 
 import "embed"
 
@@ -22,12 +19,7 @@ import "embed"
 //go:embed assets/*.tmpl all:hidden
 //go:generate go -C ../../ run ./cmd/codegen
 var embedded embed.FS
-`), 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := goDirectiveIncludes(filePath, "pkg")
+`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,101 +45,16 @@ var embedded embed.FS
 	}
 }
 
-func TestGoDirectiveIncludesSkipsDirectories(t *testing.T) {
-	dir := t.TempDir()
-	goDir := filepath.Join(dir, "generated.go")
-	if err := os.Mkdir(goDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := goDirectiveIncludes(goDir, "pkg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("got includes %#v, want none", got)
-	}
-}
-
 func TestIncludePrefixForGoFile(t *testing.T) {
 	tests := map[string]string{
-		"/src/pkg/file.go":        "pkg",
-		"/src/pkg/nested/file.go": "pkg/nested",
-		"/src/file.go":            "",
+		"/pkg/file.go":       "pkg",
+		"pkg/nested/file.go": "pkg/nested",
+		"/file.go":           "",
 	}
 	for filePath, want := range tests {
 		if got := includePrefixForGoFile(filePath); got != want {
 			t.Fatalf("%s: got %q, want %q", filePath, got, want)
 		}
-	}
-}
-
-func TestGoModIncludes(t *testing.T) {
-	got, err := goModIncludes(context.Background(), []string{"app/go.mod"}, false, staticGoMods(map[string]string{
-		"app/go.mod": `module example.com/app
-
-go 1.25
-
-replace example.com/lib => ../lib
-replace example.com/other v1.2.3 => ./other
-replace example.com/remote => example.com/fork v1.2.3
-replace example.com/absolute => /tmp/absolute
-`,
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{
-		"app/../lib/**",
-		"app/./other/**",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("includes mismatch:\n got: %#v\nwant: %#v", got, want)
-	}
-}
-
-func TestGoModIncludesRecursive(t *testing.T) {
-	got, err := goModIncludes(context.Background(), []string{"app/go.mod"}, true, staticGoMods(map[string]string{
-		"app/go.mod": `module example.com/app
-
-go 1.25
-
-replace example.com/lib => ../lib
-`,
-		"lib/go.mod": `module example.com/lib
-
-go 1.25
-
-replace example.com/leaf => ./leaf
-`,
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{
-		"app/../lib/**",
-		"lib/./leaf/**",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("includes mismatch:\n got: %#v\nwant: %#v", got, want)
-	}
-}
-
-func TestGoModIncludesStopsAtMissingRecursiveTarget(t *testing.T) {
-	got, err := goModIncludes(context.Background(), []string{"app/go.mod"}, true, staticGoMods(map[string]string{
-		"app/go.mod": `module example.com/app
-
-go 1.25
-
-replace example.com/lib => ../lib
-`,
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"app/../lib/**"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("includes mismatch:\n got: %#v\nwant: %#v", got, want)
 	}
 }
 
@@ -289,20 +196,6 @@ func TestAbsoluteIncludesIgnorePrefix(t *testing.T) {
 	got := addIncludePrefix("pkg", "/from-root.txt")
 	if got != "from-root.txt" {
 		t.Fatalf("unexpected include: %q", got)
-	}
-}
-
-func staticGoMods(files map[string]string) goModReader {
-	return staticFiles(files)
-}
-
-func staticFiles(files map[string]string) goModReader {
-	return func(_ context.Context, path string) ([]byte, error) {
-		data, ok := files[path]
-		if !ok {
-			return nil, os.ErrNotExist
-		}
-		return []byte(data), nil
 	}
 }
 

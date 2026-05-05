@@ -134,21 +134,6 @@ func newFlags(name string) *flag.FlagSet {
 	return flags
 }
 
-func goDirectiveIncludes(filePath, prefix string) ([]string, error) {
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return nil, err
-	}
-	if info.IsDir() {
-		return nil, nil
-	}
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-	return goDirectiveIncludesFromBytes(filePath, prefix, data)
-}
-
 func goDirectiveIncludesFromBytes(filePath, prefix string, data []byte) ([]string, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments)
@@ -172,7 +157,7 @@ func goDirectiveIncludesFromBytes(filePath, prefix string, data []byte) ([]strin
 }
 
 func includePrefixForGoFile(filePath string) string {
-	filePath = strings.TrimPrefix(filePath, sourceRoot+"/")
+	filePath = cleanWorkspacePath(filePath)
 	fileDir := path.Dir(filePath)
 	if fileDir == "." {
 		return ""

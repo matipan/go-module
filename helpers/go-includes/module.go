@@ -31,17 +31,25 @@ type moduleDiscovery struct {
 }
 
 func (d moduleDiscovery) includes(ctx context.Context) (_ []string, rerr error) {
-	all := newIncludeSet()
-	all.add(d.includeBase()...)
+	var all []string
+	allSeen := map[string]bool{}
+	addIncludes(&all, allSeen, d.includeBase()...)
 
-	discovered := newIncludeSet()
-	if err := d.addDirectiveIncludes(ctx, all, discovered); err != nil {
+	var discovered []string
+	discoveredSeen := map[string]bool{}
+	directiveIncludes, err := d.directiveIncludes(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if err := d.addGoModReplaceIncludes(ctx, all, discovered); err != nil {
+	addIncludes(&all, allSeen, directiveIncludes...)
+	addIncludes(&discovered, discoveredSeen, directiveIncludes...)
+
+	replaceIncludes, err := d.goModReplaceIncludes(ctx, all, allSeen)
+	if err != nil {
 		return nil, err
 	}
-	return discovered.values(), nil
+	addIncludes(&discovered, discoveredSeen, replaceIncludes...)
+	return discovered, nil
 }
 
 func (d moduleDiscovery) includeBase() []string {
@@ -63,42 +71,42 @@ func (d moduleDiscovery) includeBase() []string {
 	return patterns
 }
 
-func (d moduleDiscovery) addDirectiveIncludes(ctx context.Context, all, discovered *includeSet) (rerr error) {
+func (d moduleDiscovery) directiveIncludes(ctx context.Context) (_ []string, rerr error) {
 	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes scan directives")
 	defer telemetry.EndWithCause(span, &rerr)
 
 	excludes, err := d.nestedModuleExcludes(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	dir := d.workspace.directory([]string{addIncludePrefix(d.modulePath, "**/*.go")}, excludes)
 	goFiles, err := dir.glob(ctx, "**/*.go")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	sort.Strings(goFiles)
 
-	startCount := discovered.len()
+	var includes []string
+	seen := map[string]bool{}
 	for _, filePath := range goFiles {
 		data, err := dir.readFile(ctx, filePath)
 		if errors.Is(err, errNotRegularFile) {
 			continue
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
-		includes, err := goDirectiveIncludesFromBytes(filePath, includePrefixForGoFile(filePath), data)
+		fileIncludes, err := goDirectiveIncludesFromBytes(filePath, includePrefixForGoFile(filePath), data)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		all.add(includes...)
-		discovered.add(includes...)
+		addIncludes(&includes, seen, fileIncludes...)
 	}
 	span.SetAttributes(
 		attribute.Int("go_includes.file_count", len(goFiles)),
-		attribute.Int("go_includes.include_count", discovered.len()-startCount),
+		attribute.Int("go_includes.include_count", len(includes)),
 	)
-	return nil
+	return includes, nil
 }
 
 func (d moduleDiscovery) nestedModuleExcludes(ctx context.Context) ([]string, error) {
@@ -126,18 +134,19 @@ func (d moduleDiscovery) nestedModuleExcludes(ctx context.Context) ([]string, er
 	return excludes, nil
 }
 
-func (d moduleDiscovery) addGoModReplaceIncludes(ctx context.Context, all, discovered *includeSet) (rerr error) {
+func (d moduleDiscovery) goModReplaceIncludes(ctx context.Context, all []string, allSeen map[string]bool) (_ []string, rerr error) {
 	ctx, span := otel.Tracer("go-includes").Start(ctx, "go-includes scan go.mod replaces")
 	defer telemetry.EndWithCause(span, &rerr)
 
 	seenGoMods := map[string]bool{}
+	seenIncludes := map[string]bool{}
+	var includes []string
 	passCount := 0
-	startCount := discovered.len()
 	for {
-		dir := d.workspace.directory(all.values(), nil)
+		dir := d.workspace.directory(all, nil)
 		goMods, err := dir.glob(ctx, "**/go.mod")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		sort.Strings(goMods)
 
@@ -158,15 +167,15 @@ func (d moduleDiscovery) addGoModReplaceIncludes(ctx context.Context, all, disco
 		for _, goModPath := range newGoMods {
 			data, err := dir.readFile(ctx, goModPath)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			replaces, err := goModLocalReplaceIncludes(goModPath, data)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			for _, replace := range replaces {
-				all.add(replace.include)
-				discovered.add(replace.include)
+				addIncludes(&all, allSeen, replace.include)
+				addIncludes(&includes, seenIncludes, replace.include)
 			}
 		}
 		if !d.recursive {
@@ -176,9 +185,9 @@ func (d moduleDiscovery) addGoModReplaceIncludes(ctx context.Context, all, disco
 	span.SetAttributes(
 		attribute.Int("go_includes.go_mod_count", len(seenGoMods)),
 		attribute.Int("go_includes.pass_count", passCount),
-		attribute.Int("go_includes.include_count", discovered.len()-startCount),
+		attribute.Int("go_includes.include_count", len(includes)),
 	)
-	return nil
+	return includes, nil
 }
 
 func generateModules(ctx context.Context, workspace workspaceRoot, onlyModule string) ([]string, error) {
@@ -252,32 +261,15 @@ func containingModule(filePath string, moduleSet map[string]bool) (string, bool)
 	}
 }
 
-type includeSet struct {
-	seen map[string]bool
-	list []string
-}
-
-func newIncludeSet() *includeSet {
-	return &includeSet{seen: map[string]bool{}}
-}
-
-func (s *includeSet) add(patterns ...string) {
+func addIncludes(list *[]string, seen map[string]bool, patterns ...string) {
 	for _, pattern := range patterns {
 		if pattern == "" {
 			continue
 		}
-		if s.seen[pattern] {
+		if seen[pattern] {
 			continue
 		}
-		s.seen[pattern] = true
-		s.list = append(s.list, pattern)
+		seen[pattern] = true
+		*list = append(*list, pattern)
 	}
-}
-
-func (s *includeSet) values() []string {
-	return append([]string(nil), s.list...)
-}
-
-func (s *includeSet) len() int {
-	return len(s.list)
 }
