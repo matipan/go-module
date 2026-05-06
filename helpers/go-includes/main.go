@@ -515,18 +515,8 @@ func (d goDirective) isGenerateGoDashC() bool {
 
 // args parses the directive arguments.
 func (d goDirective) args() ([]string, error) {
-	var name string
-	var argString string
-	for _, candidate := range []string{"go:embed", "go:test:include", "go:generate:include", "go:generate"} {
-		args, ok := d.argsForName(candidate)
-		if !ok {
-			continue
-		}
-		name = candidate
-		argString = args
-		break
-	}
-	if name == "" {
+	name, argString, ok := d.line()
+	if !ok {
 		return nil, nil
 	}
 
@@ -595,21 +585,25 @@ func (d goDirective) prefixed(patterns []string) []string {
 
 // hasName reports whether the directive has the exact directive name.
 func (d goDirective) hasName(name string) bool {
-	_, ok := d.argsForName(name)
-	return ok
+	directiveName, _, ok := d.line()
+	return ok && directiveName == name
 }
 
-// argsForName returns the argument tail for an exact line directive name.
-func (d goDirective) argsForName(name string) (string, bool) {
-	prefix := "//" + name
-	if !strings.HasPrefix(d.comment, prefix) {
-		return "", false
+// line splits a known //go: directive into its name and argument tail.
+func (d goDirective) line() (string, string, bool) {
+	if !strings.HasPrefix(d.comment, "//") {
+		return "", "", false
 	}
-	args := strings.TrimPrefix(d.comment, prefix)
-	if args != "" && strings.TrimLeftFunc(args, unicode.IsSpace) == args {
-		return "", false
+	line := strings.TrimPrefix(d.comment, "//")
+	nameEnd := strings.IndexFunc(line, unicode.IsSpace)
+	if nameEnd < 0 {
+		nameEnd = len(line)
 	}
-	return args, true
+	name := line[:nameEnd]
+	if name != "go:embed" && name != "go:test:include" && name != "go:generate:include" && name != "go:generate" {
+		return "", "", false
+	}
+	return name, line[nameEnd:], true
 }
 
 // generateGoDashC recognizes go generate commands that change directory with -C.
