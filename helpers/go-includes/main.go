@@ -315,9 +315,21 @@ func (t targetModule) modulesFromGoGenerateGoDashC(ctx context.Context) ([]*targ
 	if err != nil {
 		return nil, err
 	}
-	moduleRoots, err := directiveGenerateModules(directives, t.workspace)
-	if err != nil {
-		return nil, err
+
+	var moduleRoots []string
+	for _, directive := range directives {
+		workdir, ok, err := directive.generateGoDashC()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		moduleRoot, ok := t.workspace.containingModuleDir(path.Join(directive.dir(), workdir))
+		if !ok {
+			return nil, fmt.Errorf("%s: no Go module found for go -C directory: %s", directive.position, workdir)
+		}
+		moduleRoots = append(moduleRoots, moduleRoot)
 	}
 	return t.targetModules(moduleRoots)
 }
@@ -391,62 +403,6 @@ func (t targetModule) goDirectives(ctx context.Context) ([]goDirective, error) {
 	return directives, nil
 }
 
-// directiveGenerateModules resolves already-collected go:generate go -C targets.
-func directiveGenerateModules(directives []goDirective, ws *workspace) ([]string, error) {
-	var modules []string
-	for _, directive := range directives {
-		if !directive.isGenerate() || !directive.isGenerateGoDashC() {
-			continue
-		}
-		workdir, _, err := directive.generateGoDashC()
-		if err != nil {
-			return nil, err
-		}
-		if ws == nil {
-			modules = append(modules, path.Join(directive.dir(), workdir))
-			continue
-		}
-		module, ok := ws.containingModuleDir(path.Join(directive.dir(), workdir))
-		if !ok {
-			return nil, fmt.Errorf("%s: no Go module found for go -C directory: %s", directive.position, workdir)
-		}
-		modules = append(modules, module)
-	}
-	return modules, nil
-}
-
-// scanGoFileDirectives parses one Go file and resolves directive paths.
-func scanGoFileDirectives(filePath string, data []byte, test, generate bool) ([]string, []string, error) {
-	directives, err := goDirectivesInFile(filePath, data)
-	if err != nil {
-		return nil, nil, err
-	}
-	var includes []string
-
-	for _, directive := range directives {
-		switch {
-		case directive.isEmbed():
-		case generate && directive.isGenerateInclude():
-		case test && directive.isTestInclude():
-		default:
-			continue
-		}
-		patterns, err := directive.includePatterns()
-		if err != nil {
-			return nil, nil, err
-		}
-		includes = append(includes, patterns...)
-	}
-	if !generate {
-		return includes, nil, nil
-	}
-	modules, err := directiveGenerateModules(directives, nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	return includes, modules, nil
-}
-
 // goDirectivesInFile extracts Go comment directives from one parsed Go file.
 func goDirectivesInFile(filePath string, data []byte) ([]goDirective, error) {
 	fset := token.NewFileSet()
@@ -505,12 +461,6 @@ func (d goDirective) isGenerateInclude() bool {
 // isGenerate reports whether the directive is //go:generate.
 func (d goDirective) isGenerate() bool {
 	return d.hasName("go:generate")
-}
-
-// isGenerateGoDashC reports whether the directive is a go command with -C.
-func (d goDirective) isGenerateGoDashC() bool {
-	_, ok, _ := d.generateGoDashC()
-	return ok
 }
 
 // args parses the directive arguments.

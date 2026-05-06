@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path"
 	"reflect"
 	"strings"
 	"testing"
@@ -140,8 +141,47 @@ func TestNonDirectiveCommentsAreIgnored(t *testing.T) {
 				t.Fatalf("%q: %v", test, err)
 			}
 		}
-		if len(got) != 0 || directive.isGenerateGoDashC() {
+		_, isGenerateGoDashC, err := directive.generateGoDashC()
+		if err != nil {
+			t.Fatalf("%q: %v", test, err)
+		}
+		if len(got) != 0 || isGenerateGoDashC {
 			t.Fatalf("%q: got includes %#v", test, got)
 		}
 	}
+}
+
+func scanGoFileDirectives(filePath string, data []byte, test, generate bool) ([]string, []string, error) {
+	directives, err := goDirectivesInFile(filePath, data)
+	if err != nil {
+		return nil, nil, err
+	}
+	var includes []string
+	var modules []string
+
+	for _, directive := range directives {
+		switch {
+		case directive.isEmbed():
+		case generate && directive.isGenerateInclude():
+		case test && directive.isTestInclude():
+		default:
+			if !generate {
+				continue
+			}
+			workdir, ok, err := directive.generateGoDashC()
+			if err != nil {
+				return nil, nil, err
+			}
+			if ok {
+				modules = append(modules, path.Join(directive.dir(), workdir))
+			}
+			continue
+		}
+		patterns, err := directive.includePatterns()
+		if err != nil {
+			return nil, nil, err
+		}
+		includes = append(includes, patterns...)
+	}
+	return includes, modules, nil
 }
