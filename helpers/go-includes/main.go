@@ -24,8 +24,6 @@ import (
 
 var errNotRegularFile = errors.New("not a regular file")
 
-const instrumentationLibrary = "go-includes"
-
 func main() {
 	ctx := telemetry.Init(context.Background(), telemetry.Config{Detect: true})
 	defer telemetry.Close()
@@ -67,24 +65,19 @@ func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModu
 			return nil, fmt.Errorf("workspace path must be absolute: %s", modulePath)
 		}
 	}
-	modulePathClean := cleanWorkspacePath(modulePath)
 	ws, err := newWorkspace(ctx)
 	if err != nil {
 		return nil, err
 	}
-	moduleRoot, ok := ws.containingModuleDir(modulePathClean)
+	moduleRoot, ok := ws.containingModuleDir(modulePath)
 	if !ok {
-		return nil, fmt.Errorf("no go.mod found containing path: %s", modulePathClean)
+		return nil, fmt.Errorf("no go.mod found containing path: %s", modulePath)
 	}
 	return newTargetModule(ws, moduleRoot, *lint, *test, *generate)
 }
 
 // newTargetModule builds one target module with shared workspace and modes.
 func newTargetModule(ws *workspace, moduleRoot string, lint, test, generate bool) (*targetModule, error) {
-	moduleRoot = cleanWorkspacePath(moduleRoot)
-	if escapesWorkspace(moduleRoot) {
-		return nil, fmt.Errorf("module path escapes workspace: %s", moduleRoot)
-	}
 	if !ws.moduleSet[moduleRoot] {
 		return nil, fmt.Errorf("no go.mod found for module root: %s", moduleRoot)
 	}
@@ -148,7 +141,7 @@ func (w *workspace) indexModules(ctx context.Context) error {
 
 // containingModuleDir finds the nearest ancestor module root for a workspace path.
 func (w *workspace) containingModuleDir(dir string) (string, bool) {
-	dir = cleanWorkspacePath(dir)
+	dir = path.Clean(strings.TrimPrefix(dir, "/"))
 	for {
 		if w.moduleSet[dir] {
 			return dir, true
@@ -282,13 +275,9 @@ func (t targetModule) print(ctx context.Context, w io.Writer) error {
 
 // readRegularFile reads a file from a Dagger directory and reports directories distinctly.
 func readRegularFile(ctx context.Context, dir *dagger.Directory, filePath string) ([]byte, error) {
-	cleanPath := cleanWorkspacePath(filePath)
-	if escapesWorkspace(cleanPath) {
-		return nil, fmt.Errorf("path escapes workspace: %s", filePath)
-	}
-	contents, err := dir.File(cleanPath).Contents(ctx)
+	contents, err := dir.File(filePath).Contents(ctx)
 	if err != nil {
-		fileType, statErr := dir.Stat(cleanPath).FileType(ctx)
+		fileType, statErr := dir.Stat(filePath).FileType(ctx)
 		if statErr == nil && fileType == dagger.FileTypeDirectory {
 			return nil, errNotRegularFile
 		}
@@ -341,9 +330,22 @@ func (t targetModule) modulesFromGoModLocalReplace(ctx context.Context) ([]*targ
 	if err != nil {
 		return nil, err
 	}
-	moduleRoots, err := goModLocalReplaceModulePaths(goModPath, data)
+	goMod, err := modfile.Parse(goModPath, data, nil)
 	if err != nil {
 		return nil, err
+	}
+
+	var moduleRoots []string
+	for _, replace := range goMod.Replace {
+		if replace.New.Version != "" || (!strings.HasPrefix(replace.New.Path, "./") && !strings.HasPrefix(replace.New.Path, "../")) {
+			continue
+		}
+		target := strings.TrimSuffix(replace.New.Path, "/")
+		moduleRoot, ok := t.workspace.containingModuleDir(path.Join(path.Dir(goModPath), target))
+		if !ok {
+			return nil, fmt.Errorf("no Go module found for local replace target: %s", replace.New.Path)
+		}
+		moduleRoots = append(moduleRoots, moduleRoot)
 	}
 	return t.targetModules(moduleRoots)
 }
@@ -400,12 +402,11 @@ func directiveGenerateModules(directives []goDirective, ws *workspace) ([]string
 		if err != nil {
 			return nil, err
 		}
-		workdir = cleanWorkspacePath(path.Join(directive.dir(), workdir))
 		if ws == nil {
-			modules = append(modules, workdir)
+			modules = append(modules, path.Join(directive.dir(), workdir))
 			continue
 		}
-		module, ok := ws.containingModuleDir(workdir)
+		module, ok := ws.containingModuleDir(path.Join(directive.dir(), workdir))
 		if !ok {
 			return nil, fmt.Errorf("%s: no Go module found for go -C directory: %s", directive.position, workdir)
 		}
@@ -454,7 +455,6 @@ func goDirectivesInFile(filePath string, data []byte) ([]goDirective, error) {
 		return nil, err
 	}
 
-	filePath = cleanWorkspacePath(filePath)
 	var directives []goDirective
 	for _, group := range file.Comments {
 		for _, comment := range group.List {
@@ -480,7 +480,7 @@ type goDirective struct {
 
 // dir returns the directive's workspace directory.
 func (d goDirective) dir() string {
-	dir := path.Dir(cleanWorkspacePath(d.filePath))
+	dir := path.Dir(d.filePath)
 	if dir == "." {
 		return ""
 	}
@@ -640,36 +640,4 @@ func (d goDirective) generateGoDashC() (string, bool, error) {
 		}
 	}
 	return "", false, nil
-}
-
-// goModLocalReplaceModulePaths parses local replace directives into module roots.
-func goModLocalReplaceModulePaths(goModPath string, data []byte) ([]string, error) {
-	file, err := modfile.Parse(goModPath, data, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var includes []string
-	for _, replace := range file.Replace {
-		if replace.New.Version != "" || (!strings.HasPrefix(replace.New.Path, "./") && !strings.HasPrefix(replace.New.Path, "../")) {
-			continue
-		}
-		target := strings.TrimSuffix(replace.New.Path, "/")
-		target = cleanWorkspacePath(path.Join(path.Dir(goModPath), target))
-		if escapesWorkspace(target) {
-			return nil, fmt.Errorf("local replace target escapes workspace: %s", replace.New.Path)
-		}
-		includes = append(includes, target)
-	}
-	return includes, nil
-}
-
-// cleanWorkspacePath converts an absolute workspace path into the internal relative form.
-func cleanWorkspacePath(filePath string) string {
-	return path.Clean(strings.TrimPrefix(filePath, "/"))
-}
-
-// escapesWorkspace reports whether a cleaned relative path leaves the workspace root.
-func escapesWorkspace(filePath string) bool {
-	return filePath == ".." || strings.HasPrefix(filePath, "../")
 }

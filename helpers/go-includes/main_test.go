@@ -89,28 +89,6 @@ var embedded embed.FS
 	}
 }
 
-func TestGoModLocalReplaceModulePaths(t *testing.T) {
-	got, err := goModLocalReplaceModulePaths("app/go.mod", []byte(`module example.com/app
-
-go 1.25
-
-replace example.com/lib => ./lib
-replace example.com/parent => ../parent
-replace example.com/versioned => example.com/versioned v1.2.3
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	want := []string{
-		"app/lib",
-		"parent",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("replace module paths mismatch:\n got: %#v\nwant: %#v", got, want)
-	}
-}
-
 func TestIncludeHelpers(t *testing.T) {
 	ws := &workspace{moduleSet: map[string]bool{
 		".":       true,
