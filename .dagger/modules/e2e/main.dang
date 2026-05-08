@@ -4,6 +4,7 @@ End-to-end checks for the Go module.
 type E2e {
   let generatedFixturePath: String! = "testdata/go-module-generate"
   let generatedFilePath: String! = generatedFixturePath + "/generated.go"
+  let emptyFixturePath: String! = "testdata/go-module-empty"
 
   let assert(condition: Boolean!, message: String!): Void {
     if (condition == false) {
@@ -128,6 +129,12 @@ type E2e {
     assert(
       mod.hasGenerateDirectives(ws) == false,
       "module without go:generate directive reported generate directives",
+    )
+    assert(
+      go(version: "1.25")
+        .module(ws, emptyFixturePath)
+        .hasGenerateDirectives(ws) == false,
+      "module without Go files reported generate directives",
     )
     assert(
       go(version: "1.25")
@@ -270,6 +277,20 @@ type E2e {
     assert(
       emptyChanges.removedPaths.length == 0,
       "skipped module generate produced removed paths",
+    )
+
+    let noGoFileChanges = go(version: "1.25").module(ws, emptyFixturePath).generate(ws)
+    assert(
+      noGoFileChanges.addedPaths.length == 0,
+      "module without Go files generate produced added paths",
+    )
+    assert(
+      noGoFileChanges.modifiedPaths.length == 0,
+      "module without Go files generate produced modified paths",
+    )
+    assert(
+      noGoFileChanges.removedPaths.length == 0,
+      "module without Go files generate produced removed paths",
     )
 
     null

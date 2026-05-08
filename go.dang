@@ -236,15 +236,19 @@ type GoModule {
   Whether this module's Go files contain a go:generate directive.
   """
   pub hasGenerateDirectives(ws: Workspace!): Boolean! {
-    ws
-      .directory("/", include: [subpath("**/*.go")])
-      .search(
-        pattern: "//go:generate",
-        literal: true,
-        filesOnly: true,
-        limit: 1,
-      ).{id}
-      .length > 0
+    let source = ws.directory("/", include: [subpath("**/*.go")])
+    if (source.glob("**/*.go").length == 0) {
+      false
+    } else {
+      source
+        .search(
+          pattern: "//go:generate",
+          literal: true,
+          filesOnly: true,
+          limit: 1,
+        ).{id}
+        .length > 0
+    }
   }
 
   """
