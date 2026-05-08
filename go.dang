@@ -20,17 +20,17 @@ type Go {
   """
   Marker filename that skips lint checks when found at or above a Go module root.
   """
-  pub skipLintFilename: String! = ".dagger-skip-lint"
+  pub skipLintFilename: String! = ".dagger-skip-go-lint"
 
   """
   Marker filename that skips tests when found at or above a Go module root.
   """
-  pub skipTestFilename: String! = ".dagger-skip-test"
+  pub skipTestFilename: String! = ".dagger-skip-go-test"
 
   """
   Marker filename that skips go generate when found at or above a Go module root.
   """
-  pub skipGenerateFilename: String! = ".dagger-skip-generate"
+  pub skipGenerateFilename: String! = ".dagger-skip-go-generate"
 
   """
   Return every Go module discovered from workspace go.mod files.
