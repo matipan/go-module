@@ -325,7 +325,17 @@ type GoModule {
     test: Boolean! = false,
     generate: Boolean! = false,
   ): [String!]! {
-    includeExtraFiles + includeDiscovered(ws, lint: lint, test: test, generate: generate)
+    let commonIncludes = includeExtraFiles + includeDiscovered(
+      ws,
+      lint: lint,
+      test: test,
+      generate: generate,
+    )
+    if (lint) {
+      commonIncludes + ["**/*.golangci.yml", "**/*.golangci.yaml", "**/.golangci.toml", "**/.golangci.json"]
+    } else {
+      commonIncludes
+    }
   }
 
   """
@@ -338,7 +348,7 @@ type GoModule {
     test: Boolean! = false,
     generate: Boolean! = false,
   ): Directory! {
-    ws.directory(
+    let src = ws.directory(
       "/",
       include: include(ws, lint: lint, test: test, generate: generate),
     )
