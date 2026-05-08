@@ -243,8 +243,7 @@ type GoModule {
         literal: true,
         filesOnly: true,
         limit: 1,
-      )
-      .{id}
+      ).{id}
       .length > 0
   }
 
@@ -406,7 +405,10 @@ type GoModule {
     if (shouldGenerate(ws) == false) {
       directory.changes(directory)
     } else {
-      let before = directory.withDirectory(path, source(ws, generate: true).directory(path))
+      let before = directory.withDirectory(
+        path,
+        source(ws, generate: true).directory(path),
+      )
       let after = before.withDirectory(path, generateExec(ws).directory("."))
       after.changes(before)
     }
@@ -431,8 +433,7 @@ type GoModule {
         .withDirectory(".", ws.directory("/", include: [subpath("go.mod")]))
         .withWorkdir(path)
     } else {
-      let lintImage = "docker.io/golangci/golangci-lint:v2.11.4-alpine@sha256:" +
-        "72bcd68512b4e27540dd3a778a1b7afd45759d8145cfb3c089f1d7af53e718e9"
+      let lintImage = "docker.io/golangci/golangci-lint:v2.11.4-alpine@sha256:" + "72bcd68512b4e27540dd3a778a1b7afd45759d8145cfb3c089f1d7af53e718e9"
       container
         .from(lintImage)
         .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
