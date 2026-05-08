@@ -101,6 +101,27 @@ func TestIncludeHelpers(t *testing.T) {
 
 }
 
+func TestIncludeBasePreservesNestedModuleBoundaries(t *testing.T) {
+	got := (targetModule{moduleRoot: "pkg"}).includeBase()
+	want := []string{
+		"pkg/**/*.go",
+		"pkg/**/*.c",
+		"pkg/**/*.h",
+		"pkg/**/*.s",
+		"pkg/**/*.S",
+		"pkg/**/*.syso",
+		"pkg/go.mod",
+		"pkg/**/go.mod",
+		"pkg/go.sum",
+		"pkg/**/go.sum",
+		"pkg/go.work",
+		"pkg/go.work.sum",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("includeBase mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func TestInvalidQuotedDirectiveArg(t *testing.T) {
 	_, err := (goDirective{
 		position: "test.go:1:1",

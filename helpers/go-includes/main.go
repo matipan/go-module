@@ -296,7 +296,11 @@ func (t targetModule) includeBase() []string {
 		"**/*.S",
 		"**/*.syso",
 		"go.mod",
+		// FIXME: exclude nested module trees instead of uploading their Go
+		// files just to preserve their module boundaries.
+		"**/go.mod",
 		"go.sum",
+		"**/go.sum",
 		"go.work",
 		"go.work.sum",
 	}
