@@ -57,17 +57,17 @@ type Go {
   pub module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoModule! {
     GoModule(
       path: if (findUp) {
-        let goModPath = ws
-          .directory("/", include: ["**/go.mod"])
-          .withDirectory(path, directory)
-          .findUp("go.mod", path)
-        if (goModPath == null) {
+        let foundGoModPath = ws.findUp("go.mod", path)
+        if (foundGoModPath == null) {
           raise "no Go module found containing path: " + path
-        } else if (goModPath == "go.mod") { "." } else {
-          goModPath.trimSuffix("/go.mod")
+        } else {
+          let goModPath = foundGoModPath.trimPrefix("/")
+          if (goModPath == "go.mod") { "." } else {
+            goModPath.trimSuffix("/go.mod")
+          }
         }
       } else {
-        path
+        path.trimPrefix("/")
       },
       version: version,
       includeExtraFiles: includeExtraFiles,
@@ -258,10 +258,7 @@ type GoModule {
   Whether this module root or an ancestor contains a marker filename.
   """
   let hasMarker(ws: Workspace!, filename: String!): Boolean! {
-    let markerPath = ws
-      .directory("/", include: ["**/" + filename])
-      .withDirectory(path, directory)
-      .findUp(filename, path)
+    let markerPath = ws.findUp(name: filename, from: path)
     markerPath != null
   }
 
