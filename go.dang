@@ -36,14 +36,30 @@ type Go {
   Return every Go module discovered from workspace go.mod files.
   """
   pub modules(ws: Workspace!): [GoModule!]! {
+    let lintSkipMarkers = ws
+      .directory("/", include: ["**/" + skipLintFilename])
+      .glob("**/" + skipLintFilename)
+    let testSkipMarkers = ws
+      .directory("/", include: ["**/" + skipTestFilename])
+      .glob("**/" + skipTestFilename)
+    let generateSkipMarkers = ws
+      .directory("/", include: ["**/" + skipGenerateFilename])
+      .glob("**/" + skipGenerateFilename)
+
     ws
       .directory("/", include: ["**/go.mod"])
       .glob("**/go.mod")
       .map { modPath =>
-        module(
-          ws,
-          if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") },
-          findUp: false,
+        GoModule(
+          path: if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") },
+          version: version,
+          includeExtraFiles: includeExtraFiles,
+          skipLintFilename: skipLintFilename,
+          skipTestFilename: skipTestFilename,
+          skipGenerateFilename: skipGenerateFilename,
+          lintSkipMarkers: lintSkipMarkers,
+          testSkipMarkers: testSkipMarkers,
+          generateSkipMarkers: generateSkipMarkers,
         )
       }
   }
@@ -55,6 +71,16 @@ type Go {
   findUp to false when path is already a module root and no lookup is needed.
   """
   pub module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoModule! {
+    let lintSkipMarkers = ws
+      .directory("/", include: ["**/" + skipLintFilename])
+      .glob("**/" + skipLintFilename)
+    let testSkipMarkers = ws
+      .directory("/", include: ["**/" + skipTestFilename])
+      .glob("**/" + skipTestFilename)
+    let generateSkipMarkers = ws
+      .directory("/", include: ["**/" + skipGenerateFilename])
+      .glob("**/" + skipGenerateFilename)
+
     GoModule(
       path: if (findUp) {
         let foundGoModPath = ws.findUp("go.mod", path)
@@ -74,6 +100,9 @@ type Go {
       skipLintFilename: skipLintFilename,
       skipTestFilename: skipTestFilename,
       skipGenerateFilename: skipGenerateFilename,
+      lintSkipMarkers: lintSkipMarkers,
+      testSkipMarkers: testSkipMarkers,
+      generateSkipMarkers: generateSkipMarkers,
     )
   }
 
@@ -176,6 +205,10 @@ type GoModule {
   """
   let skipGenerateFilename: String!
 
+  let lintSkipMarkers: [String!]!
+  let testSkipMarkers: [String!]!
+  let generateSkipMarkers: [String!]!
+
   """
   Return a workspace-root path for a module-relative subpath.
   """
@@ -215,21 +248,21 @@ type GoModule {
   Whether this module or an ancestor contains the configured lint skip marker.
   """
   pub skipLint(ws: Workspace!): Boolean! {
-    hasMarker(ws, skipLintFilename)
+    hasMarker(skipLintFilename, lintSkipMarkers)
   }
 
   """
   Whether this module or an ancestor contains the configured test skip marker.
   """
   pub skipTest(ws: Workspace!): Boolean! {
-    hasMarker(ws, skipTestFilename)
+    hasMarker(skipTestFilename, testSkipMarkers)
   }
 
   """
   Whether this module or an ancestor contains the configured generate skip marker.
   """
   pub skipGenerate(ws: Workspace!): Boolean! {
-    hasMarker(ws, skipGenerateFilename)
+    hasMarker(skipGenerateFilename, generateSkipMarkers)
   }
 
   """
@@ -261,9 +294,15 @@ type GoModule {
   """
   Whether this module root or an ancestor contains a marker filename.
   """
-  let hasMarker(ws: Workspace!, filename: String!): Boolean! {
-    let markerPath = ws.findUp(name: filename, from: path)
-    markerPath != null
+  let hasMarker(filename: String!, markerPaths: [String!]!): Boolean! {
+    markerPaths.any { markerPath =>
+      let markerDir = if (markerPath == filename) {
+        "."
+      } else {
+        markerPath.trimSuffix("/" + filename)
+      }
+      markerDir == "." or path == markerDir or path.hasPrefix(markerDir + "/")
+    }
   }
 
   """
