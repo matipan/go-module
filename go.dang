@@ -34,8 +34,13 @@ type Go {
 
   """
   Return every Go module discovered from workspace go.mod files.
+  Optional include/exclude patterns filter discovered module root directories.
   """
-  pub modules(ws: Workspace!): [GoModule!]! {
+  pub modules(
+    ws: Workspace!,
+    include: [String!]! = [],
+    exclude: [String!]! = [],
+  ): [GoModule!]! {
     let lintSkipMarkers = ws
       .directory("/", include: ["**/" + skipLintFilename])
       .glob("**/" + skipLintFilename)
@@ -50,8 +55,14 @@ type Go {
       .directory("/", include: ["**/go.mod"])
       .glob("**/go.mod")
       .map { modPath =>
+        if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") }
+      }
+      .filter { modPath =>
+        modulePathIncluded(ws, modPath, include, exclude)
+      }
+      .map { modPath =>
         GoModule(
-          path: if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") },
+          path: modPath,
           version: version,
           includeExtraFiles: includeExtraFiles,
           skipLintFilename: skipLintFilename,
@@ -62,6 +73,24 @@ type Go {
           generateSkipMarkers: generateSkipMarkers,
         )
       }
+  }
+
+  let modulePathIncluded(
+    ws: Workspace!,
+    modPath: String!,
+    include: [String!]!,
+    exclude: [String!]!,
+  ): Boolean! {
+    if (include.length == 0 and exclude.length == 0) {
+      true
+    } else {
+      let includePatterns = if (include.length == 0) { ["**"] } else { include }
+      let glob = if (modPath == ".") { "**" } else { modPath.trimSuffix("/") + "/**" }
+      ws
+        .directory("/", include: includePatterns, exclude: exclude)
+        .glob(glob)
+        .length > 0
+    }
   }
 
   """

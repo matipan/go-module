@@ -19,6 +19,12 @@ type E2e {
       .length > 0
   }
 
+  let containsModulePath(mods: [{{path: String!}}!]!, want: String!): Boolean! {
+    mods
+      .filter { mod => mod.path == want }
+      .length > 0
+  }
+
   """
   Run testAll while respecting per-module skip markers.
   """
@@ -71,6 +77,64 @@ type E2e {
     assert(
       direct.path == "testdata/go-module-with-testdata/testdata",
       "module lookup unexpectedly snapped with findUp false: " + direct.path,
+    )
+
+    let allModulePaths = go(version: "1.25").modules(ws).{path}
+    assert(
+      containsModulePath(allModulePaths, "fixtures/go-module-cross-include-a"),
+      "unfiltered modules did not include expected fixture module",
+    )
+    assert(
+      containsModulePath(allModulePaths, "fixtures/go-module-cross-include-b"),
+      "unfiltered modules did not include expected fixture module",
+    )
+
+    let includedModulePaths = go(version: "1.25")
+      .modules(ws, include: ["fixtures/go-module-cross-include-a"])
+      .{path}
+    assert(
+      containsModulePath(includedModulePaths, "fixtures/go-module-cross-include-a"),
+      "modules include filter did not include matching module root",
+    )
+    assert(
+      containsModulePath(includedModulePaths, "fixtures/go-module-cross-include-b") == false,
+      "modules include filter included non-matching module root",
+    )
+
+    let excludedModulePaths = go(version: "1.25")
+      .modules(ws, exclude: ["fixtures/go-module-cross-include-a"])
+      .{path}
+    assert(
+      containsModulePath(excludedModulePaths, "fixtures/go-module-cross-include-a") == false,
+      "modules exclude filter included excluded module root",
+    )
+
+    let combinedModulePaths = go(version: "1.25")
+      .modules(
+        ws,
+        include: ["fixtures/go-module-cross-include-*"],
+        exclude: ["fixtures/go-module-cross-include-b"],
+      )
+      .{path}
+    assert(
+      containsModulePath(combinedModulePaths, "fixtures/go-module-cross-include-a"),
+      "modules combined filters did not include matching module root",
+    )
+    assert(
+      containsModulePath(combinedModulePaths, "fixtures/go-module-cross-include-b") == false,
+      "modules combined filters included excluded module root",
+    )
+
+    let contentMatchedModulePaths = go(version: "1.25")
+      .modules(ws, include: ["**/module-a-only.data"])
+      .{path}
+    assert(
+      containsModulePath(contentMatchedModulePaths, "fixtures/go-module-cross-include-a"),
+      "modules include filter did not match module directory contents",
+    )
+    assert(
+      containsModulePath(contentMatchedModulePaths, "fixtures/go-module-cross-include-b") == false,
+      "modules include filter matched content outside the module directory",
     )
 
     let withExtraFiles = go(
