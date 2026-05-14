@@ -122,6 +122,23 @@ func TestIncludeBasePreservesNestedModuleBoundaries(t *testing.T) {
 	}
 }
 
+func TestTestDirectoriesFromFiles(t *testing.T) {
+	got := testDirectoriesFromFiles([]string{
+		"root_test.go",
+		"pkg/b/b_test.go",
+		"pkg/a/another_test.go",
+		"pkg/a/a_test.go",
+	})
+	want := []string{
+		".",
+		"pkg/a",
+		"pkg/b",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("testDirectoriesFromFiles mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func TestInvalidQuotedDirectiveArg(t *testing.T) {
 	_, err := (goDirective{
 		position: "test.go:1:1",
@@ -133,7 +150,7 @@ func TestInvalidQuotedDirectiveArg(t *testing.T) {
 }
 
 func TestRelativeCLIPathRejected(t *testing.T) {
-	_, err := newTargetModuleFromArgs(t.Context(), []string{"relative/module"})
+	_, _, err := newTargetModuleFromArgs(t.Context(), []string{"relative/module"})
 	if err == nil {
 		t.Fatal("expected error")
 	}

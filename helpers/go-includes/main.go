@@ -28,52 +28,62 @@ func main() {
 	ctx := telemetry.Init(context.Background(), telemetry.Config{Detect: true})
 	defer telemetry.Close()
 
-	targetModule, err := newTargetModuleFromArgs(ctx, os.Args[1:])
+	targetModule, testDirs, err := newTargetModuleFromArgs(ctx, os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := targetModule.print(ctx, os.Stdout); err != nil {
+	if testDirs {
+		err = targetModule.printTestDirectories(ctx, os.Stdout)
+	} else {
+		err = targetModule.printIncludes(ctx, os.Stdout)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
 // newTargetModuleFromArgs parses CLI flags and resolves the requested module.
-func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModule, error) {
+func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModule, bool, error) {
 	flags := flag.NewFlagSet("go-includes", flag.ExitOnError)
 	flags.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [/DIR]")
+		fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [--test-dirs] [/DIR]")
 		flags.PrintDefaults()
 	}
 	lint := flags.Bool("lint", false, "include lint inputs")
 	test := flags.Bool("test", false, "include test inputs")
 	generate := flags.Bool("generate", false, "include generate inputs")
+	testDirs := flags.Bool("test-dirs", false, "print directories containing Go tests")
 	if err := flags.Parse(cliArgs); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if flags.NArg() > 1 {
-		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+		return nil, false, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	if !*lint && !*test && !*generate {
+	if !*lint && !*test && !*generate && !*testDirs {
 		*test = true
 	}
 	modulePath := "/"
 	if flags.NArg() == 1 {
 		modulePath = flags.Arg(0)
 		if !strings.HasPrefix(modulePath, "/") {
-			return nil, fmt.Errorf("workspace path must be absolute: %s", modulePath)
+			return nil, false, fmt.Errorf("workspace path must be absolute: %s", modulePath)
 		}
 	}
 	ws, err := newWorkspace(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	moduleRoot, ok := ws.containingModuleDir(modulePath)
 	if !ok {
-		return nil, fmt.Errorf("no go.mod found containing path: %s", modulePath)
+		return nil, false, fmt.Errorf("no go.mod found containing path: %s", modulePath)
 	}
-	return newTargetModule(ws, moduleRoot, *lint, *test, *generate)
+	module, err := newTargetModule(ws, moduleRoot, *lint, *test, *generate)
+	if err != nil {
+		return nil, false, err
+	}
+	return module, *testDirs, nil
 }
 
 // newTargetModule builds one target module with shared workspace and modes.
@@ -259,8 +269,8 @@ func (t targetModule) directIncludes(ctx context.Context) ([]string, error) {
 	return includes, nil
 }
 
-// print writes the target include patterns, one per line.
-func (t targetModule) print(ctx context.Context, w io.Writer) error {
+// printIncludes writes the target include patterns, one per line.
+func (t targetModule) printIncludes(ctx context.Context, w io.Writer) error {
 	includes, err := t.includes(ctx)
 	if err != nil {
 		return err
@@ -271,6 +281,46 @@ func (t targetModule) print(ctx context.Context, w io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// printTestDirectories writes directories containing Go tests, one per line.
+func (t targetModule) printTestDirectories(ctx context.Context, w io.Writer) error {
+	dirs, err := t.testDirectories(ctx)
+	if err != nil {
+		return err
+	}
+	for _, dir := range dirs {
+		if _, err := fmt.Fprintln(w, dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// testDirectories returns module directories containing at least one *_test.go file.
+func (t targetModule) testDirectories(ctx context.Context) ([]string, error) {
+	excludes := t.workspace.nestedModuleExcludes(t.moduleRoot)
+	dir := t.workspace.directory([]string{t.subpath("**/*_test.go")}, excludes)
+	testFiles, err := dir.Glob(ctx, "**/*_test.go")
+	if err != nil {
+		return nil, err
+	}
+	return testDirectoriesFromFiles(testFiles), nil
+}
+
+func testDirectoriesFromFiles(testFiles []string) []string {
+	dirs := make([]string, 0, len(testFiles))
+	seen := map[string]bool{}
+	for _, testFile := range testFiles {
+		dir := path.Dir(testFile)
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	return dirs
 }
 
 // readRegularFile reads a file from a Dagger directory and reports directories distinctly.
