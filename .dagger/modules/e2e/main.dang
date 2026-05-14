@@ -88,6 +88,10 @@ type E2e {
       containsModulePath(allModulePaths, "fixtures/go-module-cross-include-b"),
       "unfiltered modules did not include expected fixture module",
     )
+    assert(
+      containsModulePath(allModulePaths, "testdata/go-module-excluded"),
+      "unfiltered modules did not include skipped fixture module by default",
+    )
 
     let includedModulePaths = go(version: "1.25")
       .modules(ws, include: ["fixtures/go-module-cross-include-a"])
@@ -135,6 +139,62 @@ type E2e {
     assert(
       containsModulePath(contentMatchedModulePaths, "fixtures/go-module-cross-include-b") == false,
       "modules include filter matched content outside the module directory",
+    )
+
+    let lintSkippedModulePaths = go(version: "1.25")
+      .modules(ws, includeSkipLint: false)
+      .{path}
+    assert(
+      containsModulePath(lintSkippedModulePaths, "testdata/go-module-excluded") == false,
+      "modules includeSkipLint false included lint-skipped module",
+    )
+    assert(
+      containsModulePath(lintSkippedModulePaths, "testdata/go-module-empty") == false,
+      "modules includeSkipLint false included module with lint skip marker",
+    )
+    assert(
+      containsModulePath(lintSkippedModulePaths, "testdata/go-module-skip-tree/nested") == false,
+      "modules includeSkipLint false included module with ancestor lint skip marker",
+    )
+    assert(
+      containsModulePath(lintSkippedModulePaths, "testdata/go-module-with-testdata"),
+      "modules includeSkipLint false excluded non-lint-skipped module",
+    )
+
+    let testSkippedModulePaths = go(version: "1.25")
+      .modules(ws, includeSkipTest: false)
+      .{path}
+    assert(
+      containsModulePath(testSkippedModulePaths, "testdata/go-module-excluded") == false,
+      "modules includeSkipTest false included test-skipped module",
+    )
+    assert(
+      containsModulePath(testSkippedModulePaths, "testdata/go-module-empty") == false,
+      "modules includeSkipTest false included module with test skip marker",
+    )
+    assert(
+      containsModulePath(testSkippedModulePaths, "testdata/go-module-skip-tree/nested") == false,
+      "modules includeSkipTest false included module with ancestor test skip marker",
+    )
+    assert(
+      containsModulePath(testSkippedModulePaths, "testdata/go-module-with-testdata"),
+      "modules includeSkipTest false excluded non-test-skipped module",
+    )
+
+    let generateSkippedModulePaths = go(version: "1.25")
+      .modules(ws, includeSkipGenerate: false)
+      .{path}
+    assert(
+      containsModulePath(generateSkippedModulePaths, "testdata/go-module-excluded") == false,
+      "modules includeSkipGenerate false included generate-skipped module",
+    )
+    assert(
+      containsModulePath(generateSkippedModulePaths, "testdata/go-module-skip-tree/nested") == false,
+      "modules includeSkipGenerate false included module with ancestor generate skip marker",
+    )
+    assert(
+      containsModulePath(generateSkippedModulePaths, "testdata/go-module-generate"),
+      "modules includeSkipGenerate false excluded non-generate-skipped module",
     )
 
     let withExtraFiles = go(

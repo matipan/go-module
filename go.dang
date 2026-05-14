@@ -40,6 +40,9 @@ type Go {
     ws: Workspace!,
     include: [String!]! = [],
     exclude: [String!]! = [],
+    includeSkipLint: Boolean! = true,
+    includeSkipTest: Boolean! = true,
+    includeSkipGenerate: Boolean! = true,
   ): [GoModule!]! {
     let lintSkipMarkers = ws
       .directory("/", include: ["**/" + skipLintFilename])
@@ -72,6 +75,11 @@ type Go {
           testSkipMarkers: testSkipMarkers,
           generateSkipMarkers: generateSkipMarkers,
         )
+      }
+      .filter { mod =>
+        (includeSkipLint or mod.skipLint(ws) == false) and
+        (includeSkipTest or mod.skipTest(ws) == false) and
+        (includeSkipGenerate or mod.skipGenerate(ws) == false)
       }
   }
 
