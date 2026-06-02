@@ -27,5 +27,5 @@ func currentWorkspace(ctx context.Context) (*dagger.Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	return client.LoadWorkspaceFromID(dagger.WorkspaceID(workspaceID)), nil
+	return dagger.Ref[*dagger.Workspace](client, dagger.ID(workspaceID)), nil
 }
