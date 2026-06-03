@@ -32,17 +32,17 @@ type Go {
     """
     includeExtraFiles: [String!]! = [],
     """
-    Marker filename that skips lint checks when found at or above a Go module root.
+    Workspace-relative module roots or ancestor subtrees to skip for lint checks.
     """
-    skipLintFilename: String! = ".dagger-skip-go-lint",
+    skipLint: [String!]! = [],
     """
-    Marker filename that skips tests when found at or above a Go module root.
+    Workspace-relative module roots or ancestor subtrees to skip for tests.
     """
-    skipTestFilename: String! = ".dagger-skip-go-test",
+    skipTest: [String!]! = [],
     """
-    Marker filename that skips go generate when found at or above a Go module root.
+    Workspace-relative module roots or ancestor subtrees to skip for go generate.
     """
-    skipGenerateFilename: String! = ".dagger-skip-go-generate",
+    skipGenerate: [String!]! = [],
   ) {
     if (version != null and base != null) {
       raise "version and base are mutually exclusive"
@@ -50,9 +50,9 @@ type Go {
       self.version = if (base == null) { version ?? "1.26" } else { null }
       self.base = base ?? container.from("golang:" + (version ?? "1.26") + "-alpine")
       self.includeExtraFiles = includeExtraFiles
-      self.skipLintFilename = skipLintFilename
-      self.skipTestFilename = skipTestFilename
-      self.skipGenerateFilename = skipGenerateFilename
+      self.skipLint = skipLint
+      self.skipTest = skipTest
+      self.skipGenerate = skipGenerate
       self
     }
   }
@@ -65,19 +65,19 @@ type Go {
   pub includeExtraFiles: [String!]! = []
 
   """
-  Marker filename that skips lint checks when found at or above a Go module root.
+  Workspace-relative module roots or ancestor subtrees to skip for lint checks.
   """
-  pub skipLintFilename: String! = ".dagger-skip-go-lint"
+  pub skipLint: [String!]! = []
 
   """
-  Marker filename that skips tests when found at or above a Go module root.
+  Workspace-relative module roots or ancestor subtrees to skip for tests.
   """
-  pub skipTestFilename: String! = ".dagger-skip-go-test"
+  pub skipTest: [String!]! = []
 
   """
-  Marker filename that skips go generate when found at or above a Go module root.
+  Workspace-relative module roots or ancestor subtrees to skip for go generate.
   """
-  pub skipGenerateFilename: String! = ".dagger-skip-go-generate"
+  pub skipGenerate: [String!]! = []
 
   """
   Return every Go module discovered from workspace go.mod files.
@@ -91,16 +91,6 @@ type Go {
     includeSkipTest: Boolean! = true,
     includeSkipGenerate: Boolean! = true,
   ): [GoModule!]! {
-    let lintSkipMarkers = ws
-      .directory("/", include: ["**/" + skipLintFilename])
-      .glob("**/" + skipLintFilename)
-    let testSkipMarkers = ws
-      .directory("/", include: ["**/" + skipTestFilename])
-      .glob("**/" + skipTestFilename)
-    let generateSkipMarkers = ws
-      .directory("/", include: ["**/" + skipGenerateFilename])
-      .glob("**/" + skipGenerateFilename)
-
     ws
       .directory("/", include: ["**/go.mod"])
       .glob("**/go.mod")
@@ -116,12 +106,9 @@ type Go {
           version: version,
           baseImage: base,
           includeExtraFiles: includeExtraFiles,
-          skipLintFilename: skipLintFilename,
-          skipTestFilename: skipTestFilename,
-          skipGenerateFilename: skipGenerateFilename,
-          lintSkipMarkers: lintSkipMarkers,
-          testSkipMarkers: testSkipMarkers,
-          generateSkipMarkers: generateSkipMarkers,
+          skipLintPaths: skipLint,
+          skipTestPaths: skipTest,
+          skipGeneratePaths: skipGenerate,
         )
       }
       .filter { mod =>
@@ -156,16 +143,6 @@ type Go {
   findUp to false when path is already a module root and no lookup is needed.
   """
   pub module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoModule! {
-    let lintSkipMarkers = ws
-      .directory("/", include: ["**/" + skipLintFilename])
-      .glob("**/" + skipLintFilename)
-    let testSkipMarkers = ws
-      .directory("/", include: ["**/" + skipTestFilename])
-      .glob("**/" + skipTestFilename)
-    let generateSkipMarkers = ws
-      .directory("/", include: ["**/" + skipGenerateFilename])
-      .glob("**/" + skipGenerateFilename)
-
     GoModule(
       path: if (findUp) {
         let foundGoModPath = ws.findUp("go.mod", path)
@@ -183,21 +160,18 @@ type Go {
       version: version,
       baseImage: base,
       includeExtraFiles: includeExtraFiles,
-      skipLintFilename: skipLintFilename,
-      skipTestFilename: skipTestFilename,
-      skipGenerateFilename: skipGenerateFilename,
-      lintSkipMarkers: lintSkipMarkers,
-      testSkipMarkers: testSkipMarkers,
-      generateSkipMarkers: generateSkipMarkers,
+      skipLintPaths: skipLint,
+      skipTestPaths: skipTest,
+      skipGeneratePaths: skipGenerate,
     )
   }
 
   """
   Run golangci-lint in every discovered Go module.
-  Modules with the lint skip marker are skipped.
+  Modules configured to skip lint are skipped.
   """
   pub lintAll(ws: Workspace!): Void @check {
-    let layers = modules(ws).reduce(directory) { layers, mod =>
+    let layers = modules(ws, includeSkipLint: false).reduce(directory) { layers, mod =>
       layers.withDirectory(
         mod.path,
         directory.withFile("go.mod", mod.lintExec(ws).file("go.mod")),
@@ -213,10 +187,10 @@ type Go {
 
   """
   Run tests in every discovered Go module.
-  Modules with the test skip marker are skipped.
+  Modules configured to skip tests are skipped.
   """
   pub testAll(ws: Workspace!): Void @check {
-    let mods = modules(ws).filter { mod => mod.skipTest(ws) == false }
+    let mods = modules(ws, includeSkipTest: false)
     let layers = mods.reduce(directory) { layers, mod =>
       layers.withDirectory(
         mod.path,
@@ -233,7 +207,7 @@ type Go {
 
   """
   Run go generate in every discovered Go module.
-  Modules with the generate skip marker, or without go:generate directives,
+  Modules configured to skip generate, or without go:generate directives,
   are skipped.
   """
   pub generateAll(ws: Workspace!): Changeset! @generate {
@@ -282,23 +256,19 @@ type GoModule {
   pub includeExtraFiles: [String!]!
 
   """
-  Marker filename that skips lint checks when found at or above this module root.
+  Workspace-relative module roots or ancestor subtrees to skip for lint checks.
   """
-  let skipLintFilename: String!
+  let skipLintPaths: [String!]!
 
   """
-  Marker filename that skips tests when found at or above this module root.
+  Workspace-relative module roots or ancestor subtrees to skip for tests.
   """
-  let skipTestFilename: String!
+  let skipTestPaths: [String!]!
 
   """
-  Marker filename that skips go generate when found at or above this module root.
+  Workspace-relative module roots or ancestor subtrees to skip for go generate.
   """
-  let skipGenerateFilename: String!
-
-  let lintSkipMarkers: [String!]!
-  let testSkipMarkers: [String!]!
-  let generateSkipMarkers: [String!]!
+  let skipGeneratePaths: [String!]!
 
   """
   Return a workspace-root path for a module-relative subpath.
@@ -335,24 +305,24 @@ type GoModule {
   }
 
   """
-  Whether this module or an ancestor contains the configured lint skip marker.
+  Whether this module or an ancestor subtree is configured to skip lint.
   """
   pub skipLint(ws: Workspace!): Boolean! {
-    hasMarker(skipLintFilename, lintSkipMarkers)
+    hasSkipPath(skipLintPaths)
   }
 
   """
-  Whether this module or an ancestor contains the configured test skip marker.
+  Whether this module or an ancestor subtree is configured to skip tests.
   """
   pub skipTest(ws: Workspace!): Boolean! {
-    hasMarker(skipTestFilename, testSkipMarkers)
+    hasSkipPath(skipTestPaths)
   }
 
   """
-  Whether this module or an ancestor contains the configured generate skip marker.
+  Whether this module or an ancestor subtree is configured to skip go generate.
   """
   pub skipGenerate(ws: Workspace!): Boolean! {
-    hasMarker(skipGenerateFilename, generateSkipMarkers)
+    hasSkipPath(skipGeneratePaths)
   }
 
   """
@@ -382,16 +352,12 @@ type GoModule {
   }
 
   """
-  Whether this module root or an ancestor contains a marker filename.
+  Whether this module root is at or below a configured skip path.
   """
-  let hasMarker(filename: String!, markerPaths: [String!]!): Boolean! {
-    markerPaths.any { markerPath =>
-      let markerDir = if (markerPath == filename) {
-        "."
-      } else {
-        markerPath.trimSuffix("/" + filename)
-      }
-      markerDir == "." or path == markerDir or path.hasPrefix(markerDir + "/")
+  let hasSkipPath(skipPaths: [String!]!): Boolean! {
+    skipPaths.any { skipPath =>
+      let clean = skipPath.trimPrefix("/").trimSuffix("/")
+      clean == "." or clean == "" or path == clean or path.hasPrefix(clean + "/")
     }
   }
 
@@ -435,8 +401,7 @@ type GoModule {
           modulePath: path,
           baseImage: baseImage,
           includeExtraFiles: includeExtraFiles,
-          skipTestFilename: skipTestFilename,
-          testSkipMarkers: testSkipMarkers,
+          skipTestPaths: skipTestPaths,
         )
       }
   }
@@ -534,7 +499,7 @@ type GoModule {
 
   """
   Run golangci-lint in this module.
-  If the lint skip marker is present, no lint check is run.
+  If this module is configured to skip lint, no lint check is run.
   """
   pub lint(ws: Workspace!): Void @check {
     lintExec(ws).sync
@@ -543,7 +508,7 @@ type GoModule {
 
   """
   Run tests in this module.
-  If the test skip marker is present, no tests are run.
+  If this module is configured to skip tests, no tests are run.
   """
   pub test(ws: Workspace!): Void @check {
     testExec(ws).sync
@@ -552,7 +517,7 @@ type GoModule {
 
   """
   Changes made by running go generate in this module.
-  If the generate skip marker is present or no go:generate directives are
+  If this module is configured to skip generate or no go:generate directives are
   found, the changeset is empty.
   """
   pub generate(ws: Workspace!): Changeset! {
@@ -661,11 +626,9 @@ type GoDirectory {
   let baseImage: Container!
 
   """
-  Marker filename that skips tests when found at or above this directory's Go module root.
+  Workspace-relative module roots or ancestor subtrees to skip for tests.
   """
-  let skipTestFilename: String!
-
-  let testSkipMarkers: [String!]!
+  let skipTestPaths: [String!]!
 
   """
   Return a workspace-root path for a module-relative subpath.
@@ -702,16 +665,12 @@ type GoDirectory {
   }
 
   """
-  Whether this directory's module or an ancestor contains the configured test skip marker.
+  Whether this directory's module is at or below a configured test skip path.
   """
   let skipTest: Boolean! {
-    testSkipMarkers.any { markerPath =>
-      let markerDir = if (markerPath == skipTestFilename) {
-        "."
-      } else {
-        markerPath.trimSuffix("/" + skipTestFilename)
-      }
-      markerDir == "." or modulePath == markerDir or modulePath.hasPrefix(markerDir + "/")
+    skipTestPaths.any { skipPath =>
+      let clean = skipPath.trimPrefix("/").trimSuffix("/")
+      clean == "." or clean == "" or modulePath == clean or modulePath.hasPrefix(clean + "/")
     }
   }
 
