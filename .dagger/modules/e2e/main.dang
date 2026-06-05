@@ -7,10 +7,28 @@ type E2e {
   let baseFixturePath: String! = "testdata/go-module-custom-base"
   let baseGeneratedFilePath: String! = baseFixturePath + "/generated.go"
   let emptyFixturePath: String! = "testdata/go-module-empty"
+  let skipLint: [String!]! = [
+    baseFixturePath,
+    emptyFixturePath,
+    "testdata/go-module-excluded",
+    "testdata/go-module-skip-tree",
+  ]
+  let skipTest: [String!]! = [
+    baseFixturePath,
+    emptyFixturePath,
+    "testdata/go-module-excluded",
+    "testdata/go-module-skip-tree",
+  ]
+  let skipGenerate: [String!]! = [
+    "helpers/go-includes",
+    baseFixturePath,
+    "testdata/go-module-excluded",
+    "testdata/go-module-skip-tree",
+  ]
 
   let base: Container! {
     container
-      .from("golang:1.25-alpine")
+      .from("golang:1.26.1-alpine")
       .withEnvVariable("DAGGER_GO_CUSTOM_BASE", "yes")
       .withNewFile("/custom-go-base", "yes\n")
   }
@@ -35,20 +53,21 @@ type E2e {
   }
 
   """
-  Run testAll while respecting per-module skip markers.
+  Run testAll while respecting per-module skip configuration.
   """
   pub singleModuleCheck(ws: Workspace!): Void @check {
-    go(version: "1.25").lintAll(ws)
-    go(version: "1.25").testAll(ws)
-    go(version: "1.25").module(ws, "testdata/go-module-excluded").lint(ws)
-    go(version: "1.25").module(ws, "testdata/go-module-excluded").test(ws)
+    let tool = go(version: "1.26.1", skipLint: skipLint, skipTest: skipTest, skipGenerate: skipGenerate)
+    tool.lintAll(ws)
+    tool.testAll(ws)
+    tool.module(ws, "testdata/go-module-excluded").lint(ws)
+    tool.module(ws, "testdata/go-module-excluded").test(ws)
   }
 
   """
   A directive in one module must not affect another module's source mount.
   """
   pub perModuleDirectiveCheck(ws: Workspace!): Void @check {
-    let tool = go(version: "1.25")
+    let tool = go(version: "1.26.1")
     tool.module(ws, "fixtures/go-module-cross-include-a").test(ws)
     tool.module(ws, "fixtures/go-module-cross-include-b").test(ws)
   }
@@ -57,14 +76,14 @@ type E2e {
   A nested module's directives must not affect its parent module's source mount.
   """
   pub nestedModuleDirectiveCheck(ws: Workspace!): Void @check {
-    go(version: "1.25").module(ws, "fixtures/go-module-with-nested-module").test(ws)
+    go(version: "1.26.1").module(ws, "fixtures/go-module-with-nested-module").test(ws)
   }
 
   """
   A local replace target must be mounted with its non-Go assets.
   """
   pub goModReplaceCheck(ws: Workspace!): Void @check {
-    go(version: "1.25").module(ws, "fixtures/go-module-with-replace").test(ws)
+    go(version: "1.26.1").module(ws, "fixtures/go-module-with-replace").test(ws)
   }
 
   """
@@ -73,9 +92,6 @@ type E2e {
   pub baseCheck(ws: Workspace!): Void @check {
     let tool = go(
       base: base,
-      skipLintFilename: ".dagger-skip-lint-disabled",
-      skipTestFilename: ".dagger-skip-test-disabled",
-      skipGenerateFilename: ".dagger-skip-generate-disabled",
     )
     let mod = tool.module(ws, baseFixturePath)
 
@@ -85,7 +101,7 @@ type E2e {
     )
 
     let conflict = try {
-      go(version: "1.25", base: base).version ?? "missing conflict"
+      go(version: "1.26.1", base: base).version ?? "missing conflict"
     } catch {
       err => err.message
     }
@@ -119,7 +135,7 @@ type E2e {
   Per-module introspection fields must expose the source selection intermediates.
   """
   pub moduleIntrospectionCheck(ws: Workspace!): Void @check {
-    let mod = go(version: "1.25").module(ws, "testdata/go-module-with-testdata/testdata")
+    let mod = go(version: "1.26.1").module(ws, "testdata/go-module-with-testdata/testdata")
 
     assert(
       go().version == "1.26",
@@ -130,17 +146,18 @@ type E2e {
       "module lookup did not snap to containing module: " + mod.path,
     )
     assert(
-      mod.version == "1.25",
+      mod.version == "1.26.1",
       "module did not expose inherited Go version: " + (mod.version ?? "<null>"),
     )
 
-    let direct = go(version: "1.25").module(ws, "testdata/go-module-with-testdata/testdata", findUp: false)
+    let direct = go(version: "1.26.1").module(ws, "testdata/go-module-with-testdata/testdata", findUp: false)
     assert(
       direct.path == "testdata/go-module-with-testdata/testdata",
       "module lookup unexpectedly snapped with findUp false: " + direct.path,
     )
 
-    let allModulePaths = go(version: "1.25").modules(ws).{path}
+    let tool = go(version: "1.26.1", skipLint: skipLint, skipTest: skipTest, skipGenerate: skipGenerate)
+    let allModulePaths = tool.modules(ws).{path}
     assert(
       containsModulePath(allModulePaths, "fixtures/go-module-cross-include-a"),
       "unfiltered modules did not include expected fixture module",
@@ -154,7 +171,7 @@ type E2e {
       "unfiltered modules did not include skipped fixture module by default",
     )
 
-    let includedModulePaths = go(version: "1.25")
+    let includedModulePaths = tool
       .modules(ws, include: ["fixtures/go-module-cross-include-a"])
       .{path}
     assert(
@@ -166,7 +183,7 @@ type E2e {
       "modules include filter included non-matching module root",
     )
 
-    let excludedModulePaths = go(version: "1.25")
+    let excludedModulePaths = tool
       .modules(ws, exclude: ["fixtures/go-module-cross-include-a"])
       .{path}
     assert(
@@ -174,7 +191,7 @@ type E2e {
       "modules exclude filter included excluded module root",
     )
 
-    let combinedModulePaths = go(version: "1.25")
+    let combinedModulePaths = tool
       .modules(
         ws,
         include: ["fixtures/go-module-cross-include-*"],
@@ -190,7 +207,7 @@ type E2e {
       "modules combined filters included excluded module root",
     )
 
-    let contentMatchedModulePaths = go(version: "1.25")
+    let contentMatchedModulePaths = tool
       .modules(ws, include: ["**/module-a-only.data"])
       .{path}
     assert(
@@ -202,7 +219,7 @@ type E2e {
       "modules include filter matched content outside the module directory",
     )
 
-    let lintSkippedModulePaths = go(version: "1.25")
+    let lintSkippedModulePaths = tool
       .modules(ws, includeSkipLint: false)
       .{path}
     assert(
@@ -211,18 +228,18 @@ type E2e {
     )
     assert(
       containsModulePath(lintSkippedModulePaths, "testdata/go-module-empty") == false,
-      "modules includeSkipLint false included module with lint skip marker",
+      "modules includeSkipLint false included module with lint skip config",
     )
     assert(
       containsModulePath(lintSkippedModulePaths, "testdata/go-module-skip-tree/nested") == false,
-      "modules includeSkipLint false included module with ancestor lint skip marker",
+      "modules includeSkipLint false included module with ancestor lint skip config",
     )
     assert(
       containsModulePath(lintSkippedModulePaths, "testdata/go-module-with-testdata"),
       "modules includeSkipLint false excluded non-lint-skipped module",
     )
 
-    let testSkippedModulePaths = go(version: "1.25")
+    let testSkippedModulePaths = tool
       .modules(ws, includeSkipTest: false)
       .{path}
     assert(
@@ -231,18 +248,18 @@ type E2e {
     )
     assert(
       containsModulePath(testSkippedModulePaths, "testdata/go-module-empty") == false,
-      "modules includeSkipTest false included module with test skip marker",
+      "modules includeSkipTest false included module with test skip config",
     )
     assert(
       containsModulePath(testSkippedModulePaths, "testdata/go-module-skip-tree/nested") == false,
-      "modules includeSkipTest false included module with ancestor test skip marker",
+      "modules includeSkipTest false included module with ancestor test skip config",
     )
     assert(
       containsModulePath(testSkippedModulePaths, "testdata/go-module-with-testdata"),
       "modules includeSkipTest false excluded non-test-skipped module",
     )
 
-    let generateSkippedModulePaths = go(version: "1.25")
+    let generateSkippedModulePaths = tool
       .modules(ws, includeSkipGenerate: false)
       .{path}
     assert(
@@ -251,7 +268,7 @@ type E2e {
     )
     assert(
       containsModulePath(generateSkippedModulePaths, "testdata/go-module-skip-tree/nested") == false,
-      "modules includeSkipGenerate false included module with ancestor generate skip marker",
+      "modules includeSkipGenerate false included module with ancestor generate skip config",
     )
     assert(
       containsModulePath(generateSkippedModulePaths, "testdata/go-module-generate"),
@@ -259,7 +276,7 @@ type E2e {
     )
 
     let withExtraFiles = go(
-      version: "1.25",
+      version: "1.26.1",
       includeExtraFiles: ["LICENSE"],
     ).module(ws, "testdata/go-module-with-testdata")
     assert(
@@ -275,54 +292,54 @@ type E2e {
       "module base includes exposed workspace-wide Go pattern",
     )
 
-    let skipped = go(version: "1.25").module(ws, "testdata/go-module-excluded")
+    let skipped = tool.module(ws, "testdata/go-module-excluded")
     assert(
       skipped.skipLint(ws),
-      "module did not detect lint skip marker",
+      "module did not detect lint skip config",
     )
     assert(
       skipped.skipTest(ws),
-      "module did not detect test skip marker",
+      "module did not detect test skip config",
     )
     assert(
       skipped.skipGenerate(ws),
-      "module did not detect generate skip marker",
+      "module did not detect generate skip config",
     )
 
-    let treeSkipped = go(version: "1.25").module(ws, "testdata/go-module-skip-tree/nested")
+    let treeSkipped = tool.module(ws, "testdata/go-module-skip-tree/nested")
     assert(
       treeSkipped.skipLint(ws),
-      "nested module did not inherit lint skip marker from ancestor",
+      "nested module did not inherit lint skip config from ancestor",
     )
     assert(
       treeSkipped.skipTest(ws),
-      "nested module did not inherit test skip marker from ancestor",
+      "nested module did not inherit test skip config from ancestor",
     )
     assert(
       treeSkipped.skipGenerate(ws),
-      "nested module did not inherit generate skip marker from ancestor",
+      "nested module did not inherit generate skip config from ancestor",
     )
 
     assert(
       mod.skipTest(ws) == false,
-      "module without marker reported skipped tests",
+      "module without skip config reported skipped tests",
     )
     assert(
       mod.skipGenerate(ws) == false,
-      "module without marker reported skipped generate",
+      "module without skip config reported skipped generate",
     )
     assert(
       mod.hasGenerateDirectives(ws) == false,
       "module without go:generate directive reported generate directives",
     )
     assert(
-      go(version: "1.25")
+      go(version: "1.26.1")
         .module(ws, emptyFixturePath)
         .hasGenerateDirectives(ws) == false,
       "module without Go files reported generate directives",
     )
     assert(
-      go(version: "1.25")
+      go(version: "1.26.1")
         .module(ws, generatedFixturePath)
         .hasGenerateDirectives(ws),
       "module with go:generate directive did not report generate directives",
@@ -368,7 +385,7 @@ type E2e {
       "testData directory did not include module testdata fixture",
     )
 
-    let replaced = go(version: "1.25").module(ws, "fixtures/go-module-with-replace")
+    let replaced = go(version: "1.26.1").module(ws, "fixtures/go-module-with-replace")
     let replacedIncludes = replaced.includeDiscovered(ws, test: true)
     assert(
       containsPath(replacedIncludes, "fixtures/replaced-lib/**/*.go"),
@@ -379,7 +396,7 @@ type E2e {
       "go.mod replace includes did not include replaced lib go:embed file",
     )
 
-    let includedGoMod = go(version: "1.25").module(ws, "fixtures/go-module-with-included-gomod-replace/sdk/go")
+    let includedGoMod = go(version: "1.26.1").module(ws, "fixtures/go-module-with-included-gomod-replace/sdk/go")
     let includedGoModIncludes = includedGoMod.includeDiscovered(ws, generate: true)
     assert(
       containsPath(
@@ -416,13 +433,13 @@ type E2e {
   Run go generate and verify its changeset.
   """
   pub generateCheck(ws: Workspace!): Void @check {
-    go(version: "1.25")
+    go(version: "1.26.1")
       .module(ws, "fixtures/go-module-with-included-gomod-replace/sdk/go")
       .generate(ws)
       .layer
       .sync
 
-    let changes = go(version: "1.25").generateAll(ws)
+    let changes = go(version: "1.26.1", skipGenerate: skipGenerate).generateAll(ws)
 
     assert(
       changes.addedPaths.length == 1,
@@ -448,8 +465,8 @@ type E2e {
     )
 
     let emptyChanges = go(
-      version: "1.25",
-      skipGenerateFilename: ".dagger-skip-generate-e2e",
+      version: "1.26.1",
+      skipGenerate: [generatedFixturePath],
     ).module(ws, generatedFixturePath).generate(ws)
     assert(
       emptyChanges.addedPaths.length == 0,
@@ -464,7 +481,7 @@ type E2e {
       "skipped module generate produced removed paths",
     )
 
-    let noGoFileChanges = go(version: "1.25").module(ws, emptyFixturePath).generate(ws)
+    let noGoFileChanges = go(version: "1.26.1").module(ws, emptyFixturePath).generate(ws)
     assert(
       noGoFileChanges.addedPaths.length == 0,
       "module without Go files generate produced added paths",
