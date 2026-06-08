@@ -1,0 +1,9 @@
+name = "e2e"
+engineVersion = "v0.20.6"
+
+[runtime]
+  source = "dang"
+
+[[dependencies]]
+  name = "go"
+  source = "../../.."

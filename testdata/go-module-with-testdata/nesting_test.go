@@ -28,7 +28,7 @@ func TestDaggerSessionAvailableFromGoTest(t *testing.T) {
 				directory(path: %q) { entries }
 			}
 			currentWorkspace {
-				path
+				cwd
 				directory(path: "/", include: ["LICENSE"]) { entries }
 			}
 		}`, wd),
@@ -70,7 +70,7 @@ func TestDaggerSessionAvailableFromGoTest(t *testing.T) {
 				} `json:"directory"`
 			} `json:"host"`
 			CurrentWorkspace struct {
-				Path      string `json:"path"`
+				Cwd       string `json:"cwd"`
 				Directory struct {
 					Entries []string `json:"entries"`
 				} `json:"directory"`
@@ -90,8 +90,8 @@ func TestDaggerSessionAvailableFromGoTest(t *testing.T) {
 		t.Fatalf("unexpected nested Dagger host directory entries: %v", entries)
 	}
 
-	if result.Data.CurrentWorkspace.Path != "testdata/go-module-with-testdata" {
-		t.Fatalf("unexpected nested Dagger workspace path: %q", result.Data.CurrentWorkspace.Path)
+	if result.Data.CurrentWorkspace.Cwd != "/testdata/go-module-with-testdata" {
+		t.Fatalf("unexpected nested Dagger workspace cwd: %q", result.Data.CurrentWorkspace.Cwd)
 	}
 	if !contains(result.Data.CurrentWorkspace.Directory.Entries, "LICENSE") {
 		t.Fatalf("unexpected nested Dagger workspace entries: %v", result.Data.CurrentWorkspace.Directory.Entries)
