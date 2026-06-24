@@ -56,10 +56,23 @@ type Go {
       self.version = if (base == null) { version ?? "1.26" } else { null }
       self.base = base ?? container.from("golang:" + (version ?? "1.26") + "-alpine")
       self.includeExtraFiles = includeExtraFiles
-      self.lint = lint
-      self.test = test
-      self.generate = generate
+      self.lint = normalizePatterns(lint)
+      self.test = normalizePatterns(test)
+      self.generate = normalizePatterns(generate)
       self
+    }
+  }
+
+  """
+  Normalize selector strings from workspace module settings.
+
+  Dagger v1.0.0-beta.4 may pass TOML string arrays as JSON-fragment strings
+  like ["[\"!infra\"", "\"!docs\"]"]; trim those wrappers so selection still
+  sees the intended patterns.
+  """
+  let normalizePatterns(patterns: [String!]!): [String!]! {
+    patterns.map { p =>
+      p.trimPrefix("[").trimSuffix("]").trimPrefix("\"").trimSuffix("\"")
     }
   }
 
@@ -488,7 +501,13 @@ type GoModule {
     [
       subpath("**/*.go"),
       subpath("**/*.c"),
+      subpath("**/*.cc"),
+      subpath("**/*.cpp"),
+      subpath("**/*.cxx"),
       subpath("**/*.h"),
+      subpath("**/*.hh"),
+      subpath("**/*.hpp"),
+      subpath("**/*.hxx"),
       subpath("**/*.s"),
       subpath("**/*.S"),
       subpath("**/*.syso"),
@@ -620,6 +639,8 @@ type GoModule {
       let lintImage = "docker.io/golangci/golangci-lint:v2.11.4-alpine@sha256:" + "72bcd68512b4e27540dd3a778a1b7afd45759d8145cfb3c089f1d7af53e718e9"
       container
         .from(lintImage)
+        # cgo dependencies may need a C/C++ toolchain during typecheck.
+        .withExec(["apk", "add", "--no-cache", "build-base"])
         .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
         .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
         .withMountedCache("/root/.cache/golangci-lint", cacheVolume("golangci-lint"))
